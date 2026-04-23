@@ -310,38 +310,45 @@ class GenVarLoaderSequenceBuilder:
             sample_idx = sample_names.index(sample_name)
 
         # ── 3. 重建单倍型序列 ──
+        # 参考用户官方脚本：
+        #   haps = dataset[region_idx, sample_idx]
+        #   seq1 = haps[0].decode()  # haplotype 1
+        #   seq2 = haps[1].decode()  # haplotype 2
+        # haps[0] = allele 0 block, haps[1] = allele 1 block（对于二倍体）
+        # 注意：每个 block 可能是多个 bytes 元素（genvarloader 用 Ragged 存储），
+        # 需要 .to_list() 或解码整个 block，而不是取某个元素
         try:
             haps = ds[region_idx, sample_idx]
         except Exception as e:
             print(f"[DEBUG] ds[{region_idx}, {sample_idx}] raised: {type(e).__name__}: {e}")
             return None
 
-        # haps 可能是：
-        #   - Ragged[bytes_]（不等长单倍型）
-        #   - NDArray[np.bytes_]（等长，shape = (2*n, L) 或 (n_haps, L)）
-        # GenVarLoader 返回的 shape 通常是 (n_chroms * 2, L)，
-        # 但我们只关心当前区域，haps[0] = hap1, haps[1] = hap2
+        # haps 是该样本在该区域的 haplotype blocks
+        # haps[0] = allele 0 的序列，haps[1] = allele 1 的序列
+        # 对于 with_seqs("haplotypes")，每个 haps[i] 是一个 bytes 对象或字节数组
+        # 直接取第一个 block 就是 hap1，第二个 block 就是 hap2
 
-        if isinstance(haps, tuple):
-            # 可能是 (haplotypes, tracks) 返回
-            hap_arr = haps[0]
-        else:
-            hap_arr = haps
+        # 处理 haps 的不同返回格式
+        hap1_raw = haps[0]
+        hap2_raw = haps[1]
 
-        # 统一转为 numpy bytes 数组
-        if not isinstance(hap_arr, np.ndarray):
-            hap_arr = np.array(hap_arr)
+        # hap1_raw / hap2_raw 可能是 bytes, bytearray, np.bytes_,
+        # 或 Ragged/AnnotatedHaps 对象，需要统一解码
+        def _decode_hap(hap_raw):
+            # Ragged/AnnotatedHaps：尝试 .to_bytes() 或直接转 bytes
+            if hasattr(hap_raw, 'to_bytes'):
+                hap_raw = hap_raw.to_bytes()
+            elif hasattr(hap_raw, 'to_list'):
+                # Ragged 结构：to_list() 返回 bytes 列表
+                lst = hap_raw.to_list()
+                if isinstance(lst, list) and all(isinstance(x, (bytes, bytearray)) for x in lst):
+                    return b''.join(bytes(x) for x in lst).decode('ascii')
+            # 统一转为 numpy bytes 数组后解码
+            arr = np.asarray(hap_raw)
+            return _numpy_bytes_to_str(arr)
 
-        # 形状处理：hap_arr 应为 (2, L) 或 (n, L)
-        if hap_arr.ndim == 1:
-            # 单条（罕见），复制给 hap1 和 hap2
-            hap_arr = np.stack([hap_arr, hap_arr], axis=0)
-        elif hap_arr.shape[0] == 1:
-            hap_arr = np.concatenate([hap_arr, hap_arr], axis=0)
-
-        # hap_arr[0] = haplotype 1, hap_arr[1] = haplotype 2
-        hap1_seq = _numpy_bytes_to_str(hap_arr[0])
-        hap2_seq = _numpy_bytes_to_str(hap_arr[1])
+        hap1_seq = _decode_hap(hap1_raw)
+        hap2_seq = _decode_hap(hap2_raw)
 
         if not hap1_seq or not hap2_seq:
             return None
