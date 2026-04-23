@@ -26,12 +26,23 @@ data:
   
   # Embedding聚合：mean（平均）/ concat（拼接）
   emb_aggregation: "mean"
-  
-  # 是否标准化
-  standardize: true
-  
-  # 缺失值填充
-  fill_na_strategy: "median"
+
+# 预处理配置（防止数据泄露的关键）
+preprocess:
+  enabled: true
+
+  # ========== 基因组embedding降维 ==========
+  # 降维策略：pca / none
+  emb_reducer: "pca"
+  # PCA目标维度："auto" -> min(n_samples, n_features)
+  # 或指定整数如 128, 256
+  emb_n_components: "auto"
+  # 降维前是否先标准化
+  emb_standardize_first: true
+
+  # ========== 表格数据填补 ==========
+  # 填补策略：median / mean / most_frequent / zero
+  tab_impute_strategy: "median"
 
 # 交叉验证
 cv:

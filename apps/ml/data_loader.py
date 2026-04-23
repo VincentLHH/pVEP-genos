@@ -69,6 +69,40 @@ class MultiOmicsDataLoader:
 
         return X, self._labels.values, feature_names, self._sample_ids
 
+    def load_all_with_metadata(self) -> Dict:
+        """
+        加载全部数据，并返回详细元信息。
+
+        Returns:
+            dict: {
+                "X": 特征矩阵,
+                "y": 标签向量,
+                "feature_names": 特征名列表,
+                "sample_ids": 样本ID列表,
+                "emb_indices": genome特征列索引,
+                "metab_indices": 代谢组特征列索引,
+                "pheno_indices": 表型组特征列索引,
+                "emb_dim": genome原始维度,
+            }
+        """
+        X, y, feature_names, sample_ids = self.load_all()
+
+        # 推断各模态列索引
+        emb_indices = [i for i, name in enumerate(feature_names) if name.startswith("emb_")]
+        metab_indices = [i for i, name in enumerate(feature_names) if name.startswith("metab_")]
+        pheno_indices = [i for i, name in enumerate(feature_names) if name.startswith("pheno_")]
+
+        return {
+            "X": X,
+            "y": y,
+            "feature_names": feature_names,
+            "sample_ids": sample_ids,
+            "emb_indices": emb_indices,
+            "metab_indices": metab_indices,
+            "pheno_indices": pheno_indices,
+            "emb_dim": len(emb_indices) if emb_indices else 0,
+        }
+
     def load_subset(self, modules: List[str]) -> Tuple[np.ndarray, np.ndarray, List[str], List[str]]:
         """
         加载指定模态子集（用于消融实验）。

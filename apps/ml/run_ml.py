@@ -37,6 +37,7 @@ from apps.ml.config import (
     CVConfig,
     HyperparamConfig,
     AblationConfig,
+    PreprocessConfig,
     OutputConfig,
     GlobalConfig,
 )
@@ -155,10 +156,17 @@ def run_full_pipeline(cfg: GlobalConfig, args):
         X, y, feature_names, sample_ids = data_loader.load_all()
         print(f"  样本数: {X.shape[0]}")
         print(f"  特征数: {X.shape[1]}")
-        print(f"  标签分布: {dict(zip(*zip(*[[k, v] for k, v in zip(*zip(*[[str(k), v] for k, v in zip(*np.unique(y, return_counts=True))])])]))) if hasattr(y, '__iter__') else {}}")
-        print(f"  模态: genome={X.shape[1] if 'genome' in str(data_loader._emb_features.shape) else 0}, "
-              f"metab={data_loader._metab_features.shape[1] if hasattr(data_loader._metab_features, 'shape') else 0}, "
-              f"pheno={data_loader._pheno_features.shape[1] if hasattr(data_loader._pheno_features, 'shape') else 0}")
+        # 标签分布
+        unique, counts = np.unique(y, return_counts=True)
+        label_dist = dict(zip(unique.tolist(), counts.tolist()))
+        print(f"  标签分布: {label_dist}")
+        # 模态信息
+        emb_shape = data_loader._emb_features.shape if data_loader._emb_features is not None else (0, 0)
+        metab_shape = data_loader._metab_features.shape if data_loader._metab_features is not None else (0, 0)
+        pheno_shape = data_loader._pheno_features.shape if data_loader._pheno_features is not None else (0, 0)
+        print(f"  模态: genome={emb_shape[1] if len(emb_shape) > 1 else 0}, "
+              f"metab={metab_shape[1] if len(metab_shape) > 1 else 0}, "
+              f"pheno={pheno_shape[1] if len(pheno_shape) > 1 else 0}")
     except Exception as e:
         print(f"  ❌ 数据加载失败: {e}")
         return
@@ -171,6 +179,7 @@ def run_full_pipeline(cfg: GlobalConfig, args):
 
         trainer = MLTrainer(
             cfg.cv, cfg.output,
+            preprocess_cfg=getattr(cfg, 'preprocess', None),
             random_state=cfg.random_state,
             n_jobs=cfg.n_jobs,
         )
@@ -216,6 +225,7 @@ def run_full_pipeline(cfg: GlobalConfig, args):
         cfg.cv,
         cfg.hyperparam,
         cfg.output,
+        preprocess_cfg=getattr(cfg, 'preprocess', None),
         random_state=cfg.random_state,
         n_jobs=cfg.n_jobs,
     )
@@ -266,6 +276,7 @@ def run_ablation_only(cfg: GlobalConfig, args):
         cfg.cv,
         cfg.hyperparam,
         cfg.output,
+        preprocess_cfg=getattr(cfg, 'preprocess', None),
         random_state=cfg.random_state,
         n_jobs=cfg.n_jobs,
     )

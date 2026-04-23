@@ -59,6 +59,7 @@ class AblationStudy:
         cv_cfg,
         hyperparam_cfg,
         output_cfg,
+        preprocess_cfg=None,
         random_state: int = 42,
         n_jobs: int = -1,
     ):
@@ -68,6 +69,7 @@ class AblationStudy:
             cv_cfg: CVConfig实例
             hyperparam_cfg: HyperparamConfig实例
             output_cfg: OutputConfig实例
+            preprocess_cfg: PreprocessConfig实例（可选）
             random_state: 随机种子
             n_jobs: 并行任务数
         """
@@ -75,6 +77,7 @@ class AblationStudy:
         self.cv_cfg = cv_cfg
         self.hyperparam_cfg = hyperparam_cfg
         self.output_cfg = output_cfg
+        self.preprocess_cfg = preprocess_cfg
         self.random_state = random_state
         self.n_jobs = n_jobs
 
@@ -131,6 +134,7 @@ class AblationStudy:
             # 训练所有模型
             trainer = MLTrainer(
                 self.cv_cfg, self.output_cfg,
+                preprocess_cfg=self.preprocess_cfg,
                 random_state=self.random_state,
                 n_jobs=self.n_jobs,
             )

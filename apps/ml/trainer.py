@@ -17,6 +17,7 @@ from sklearn.model_selection import (
     cross_val_score,
 )
 from sklearn.metrics import roc_auc_score
+from sklearn.base import clone
 
 from .models import create_model, get_param_grid, AVAILABLE_MODELS
 
@@ -26,9 +27,10 @@ class MLTrainer:
     机器学习训练器。
 
     功能：
-    1. 交叉验证评估
-    2. 超参搜索（GridSearchCV）
-    3. 模型训练与预测
+    1. 预处理（集成到CV中，防止数据泄露）
+    2. 交叉验证评估
+    3. 超参搜索（GridSearchCV）
+    4. 模型训练与预测
 
     用法：
         trainer = MLTrainer(config)
@@ -36,16 +38,25 @@ class MLTrainer:
         best_model = trainer.train(X, y, model_name="xgboost", params=best_params)
     """
 
-    def __init__(self, cv_cfg, output_cfg, random_state: int = 42, n_jobs: int = -1):
+    def __init__(
+        self,
+        cv_cfg,
+        output_cfg,
+        preprocess_cfg=None,
+        random_state: int = 42,
+        n_jobs: int = -1,
+    ):
         """
         Args:
             cv_cfg: CVConfig实例
             output_cfg: OutputConfig实例
+            preprocess_cfg: PreprocessConfig实例（可选）
             random_state: 随机种子
             n_jobs: 并行任务数
         """
         self.cv_cfg = cv_cfg
         self.output_cfg = output_cfg
+        self.preprocess_cfg = preprocess_cfg
         self.random_state = random_state
         self.n_jobs = n_jobs
 
@@ -55,6 +66,55 @@ class MLTrainer:
             shuffle=cv_cfg.shuffle,
             random_state=random_state,
         )
+
+        # 初始化预处理器（延迟）
+        self._preprocessor = None
+
+    def _get_preprocessor(self, X):
+        """
+        获取或创建预处理器。
+
+        使用延迟初始化，确保在CV fold内正确fit。
+        """
+        if self.preprocess_cfg is None or not self.preprocess_cfg.enabled:
+            return None
+
+        from .preprocessor import MultiOmicsPreprocessor
+
+        if self._preprocessor is None:
+            self._preprocessor = MultiOmicsPreprocessor(
+                emb_n_components=self.preprocess_cfg.emb_n_components,
+                emb_standardize_first=self.preprocess_cfg.emb_standardize_first,
+                tab_strategy=self.preprocess_cfg.tab_impute_strategy,
+            )
+
+        return self._preprocessor
+
+    def _preprocess_fold(self, X_train, X_val, X_test=None):
+        """
+        在单个CV fold内进行预处理。
+
+        关键：只使用X_train fit预处理器，然后transform所有数据。
+
+        Returns:
+            (X_train_proc, X_val_proc) 或 (X_train_proc, X_val_proc, X_test_proc)
+        """
+        preprocessor = self._get_preprocessor(X_train)
+        if preprocessor is None:
+            return (X_train, X_val) if X_test is None else (X_train, X_val, X_test)
+
+        # 在训练集上fit
+        preprocessor.fit(X_train)
+
+        # Transform所有
+        X_train_proc = preprocessor.transform(X_train)
+        X_val_proc = preprocessor.transform(X_val)
+
+        if X_test is not None:
+            X_test_proc = preprocessor.transform(X_test)
+            return X_train_proc, X_val_proc, X_test_proc
+
+        return X_train_proc, X_val_proc
 
     def cv_evaluate(
         self,
@@ -67,6 +127,8 @@ class MLTrainer:
     ) -> Dict:
         """
         交叉验证评估。
+
+        预处理在每个fold的train部分fit，确保无数据泄露。
 
         Args:
             X: 特征矩阵
@@ -99,78 +161,119 @@ class MLTrainer:
             "training_time": 0.0,
         }
 
-        # 超参搜索
-        if param_grid and len(param_grid) > 1:
-            if verbose:
-                print(f"超参搜索: {len(param_grid)} 个组合")
+        # 手动CV循环（支持预处理）
+        # 使用手动循环以确保预处理在每个fold内正确fit/transform
+        oof_preds = np.zeros(len(y))
+        oof_probas = np.zeros(len(y))
+        fold_scores_list = []
+        best_score = -1
+        best_params = None
+        best_preprocessor = None
+        best_fold_model = None
 
-            model = create_model(model_name, random_state=self.random_state)
-            grid_search = GridSearchCV(
-                model,
-                param_grid,
-                cv=self.cv,
-                scoring=scoring,
-                n_jobs=self.n_jobs,
-                verbose=verbose,
-                return_train_score=True,
-            )
-            grid_search.fit(X, y)
+        for fold_idx, (train_idx, val_idx) in enumerate(self.cv.split(X, y)):
+            X_train, X_val = X[train_idx], X[val_idx]
+            y_train, y_val = y[train_idx], y[val_idx]
 
-            results["best_params"] = grid_search.best_params_
-            results["mean_score"] = grid_search.best_score_
-            results["cv_results"] = {
-                "mean_test_score": float(np.mean(grid_search.cv_results_["mean_test_score"])),
-                "std_test_score": float(np.std(grid_search.cv_results_["mean_test_score"])),
-                "n_combinations": len(param_grid),
-            }
+            # 在fold内预处理
+            X_train_proc, X_val_proc = self._preprocess_fold(X_train, X_val)
+            results["n_features"] = X_train_proc.shape[1]  # 更新处理后特征数
 
-            if verbose:
-                print(f"最佳参数: {grid_search.best_params_}")
-                print(f"CV分数: {grid_search.best_score_:.4f} (+/- {grid_search.cv_results_['std_test_score']:.4f})")
+            if param_grid and len(param_grid) > 1:
+                # 超参搜索：在此fold内搜索最佳参数
+                fold_best_score = -1
+                fold_best_params = None
+                fold_best_model = None
 
-            best_model = grid_search.best_estimator_
-        else:
-            # 单参数或无超参搜索
-            if param_grid:
-                params = param_grid[0] if param_grid else {}
+                for params in param_grid:
+                    model = create_model(model_name, random_state=self.random_state, **params)
+                    model.fit(X_train_proc, y_train)
+
+                    if scoring == "roc_auc":
+                        from sklearn.metrics import roc_auc_score
+                        score = roc_auc_score(y_val, model.predict_proba(X_val_proc)[:, 1])
+                    else:
+                        score = model.score(X_val_proc, y_val)
+
+                    if score > fold_best_score:
+                        fold_best_score = score
+                        fold_best_params = params
+                        fold_best_model = model
+
+                fold_scores_list.append(fold_best_score)
+
+                if fold_best_score > best_score:
+                    best_score = fold_best_score
+                    best_params = fold_best_params
+                    best_fold_model = fold_best_model
+                    # 保存这个fold的预处理器用于最终模型
+                    best_preprocessor = self._get_preprocessor(X_train)
+
             else:
-                params = {}
+                # 无超参搜索
+                if param_grid:
+                    params = param_grid[0] if param_grid else {}
+                else:
+                    params = {}
 
-            model = create_model(model_name, random_state=self.random_state, **params)
+                model = create_model(model_name, random_state=self.random_state, **params)
+                model.fit(X_train_proc, y_train)
 
-            fold_scores = cross_val_score(
-                model, X, y, cv=self.cv, scoring=scoring, n_jobs=self.n_jobs
-            )
+                if scoring == "roc_auc":
+                    from sklearn.metrics import roc_auc_score
+                    fold_score = roc_auc_score(y_val, model.predict_proba(X_val_proc)[:, 1])
+                else:
+                    fold_score = model.score(X_val_proc, y_val)
 
-            results["fold_scores"] = fold_scores.tolist()
-            results["mean_score"] = float(np.mean(fold_scores))
-            results["std_score"] = float(np.std(fold_scores))
-            results["best_params"] = params
+                fold_scores_list.append(fold_score)
+
+                if fold_score > best_score:
+                    best_score = fold_score
+                    best_params = params
+                    best_fold_model = model
+                    best_preprocessor = self._get_preprocessor(X_train)
+
+            # OOF预测
+            oof_preds[val_idx] = best_fold_model.predict(X_val_proc)
+            oof_probas[val_idx] = best_fold_model.predict_proba(X_val_proc)[:, 1]
 
             if verbose:
-                print(f"CV分数: {results['mean_score']:.4f} (+/- {results['std_score']:.4f})")
-                print(f"各折分数: {[f'{s:.4f}' for s in fold_scores]}")
+                print(f"  Fold {fold_idx + 1}: {scoring}={fold_scores_list[-1]:.4f}")
 
-            # 使用全部数据训练最终模型
-            model.fit(X, y)
-            best_model = model
+        # 汇总结果
+        results["fold_scores"] = fold_scores_list
+        results["mean_score"] = float(np.mean(fold_scores_list))
+        results["std_score"] = float(np.std(fold_scores_list))
+        results["best_params"] = best_params
+        results["preprocessing"] = {
+            "enabled": self.preprocess_cfg is not None and self.preprocess_cfg.enabled,
+            "emb_n_components": str(self.preprocess_cfg.emb_n_components) if self.preprocess_cfg else "N/A",
+            "tab_impute_strategy": self.preprocess_cfg.tab_impute_strategy if self.preprocess_cfg else "N/A",
+        }
 
+        if verbose:
+            print(f"CV分数: {results['mean_score']:.4f} (+/- {results['std_score']:.4f})")
+            print(f"最佳参数: {best_params}")
+
+        # 使用全部数据训练最终模型
+        if best_preprocessor is not None:
+            best_preprocessor.fit(X)
+            X_proc = best_preprocessor.transform(X)
+        else:
+            X_proc = X
+
+        final_model = create_model(model_name, random_state=self.random_state, **best_params)
+        final_model.fit(X_proc, y)
         results["training_time"] = time.time() - start_time
 
-        # 获取OOF预测
-        try:
-            oof_proba = cross_val_predict(
-                best_model, X, y, cv=self.cv, method="predict_proba", n_jobs=self.n_jobs
-            )[:, 1]
-            oof_pred = (oof_proba > 0.5).astype(int)
-            results["oof_predictions"] = oof_pred.tolist()
-            results["oof_probabilities"] = oof_proba.tolist()
+        # OOF预测结果
+        results["oof_predictions"] = oof_preds.tolist()
+        results["oof_probabilities"] = oof_probas.tolist()
+        results["y_true"] = y.tolist()
 
-            # 计算额外指标
-            if len(np.unique(y)) == 2:
-                results["oof_auc"] = float(roc_auc_score(y, oof_proba))
-        except Exception:
-            pass
+        # 计算额外指标
+        if len(np.unique(y)) == 2:
+            results["oof_auc"] = float(roc_auc_score(y, oof_probas))
 
         if verbose:
             print(f"耗时: {results['training_time']:.1f}s")

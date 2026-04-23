@@ -31,8 +31,35 @@ class DataConfig:
     emb_aggregation: str = "mean"
     # 是否标准化特征
     standardize: bool = True
-    # 缺失值填充策略
-    fill_na_strategy: str = "median"  # median / mean / zero
+    # 缺失值填充策略（已废弃，统一使用PreprocessConfig）
+    fill_na_strategy: str = "median"  # deprecated, use preprocess instead
+
+
+@dataclass
+class PreprocessConfig:
+    """
+    预处理配置。
+
+    设计原则：
+    1. 基因组embedding：降维（而非填补），只使用训练集统计量防止泄露
+    2. 表格数据（代谢组/表型组）：填补（而非降维），只使用训练集统计量防止泄露
+    """
+    # ========== Embedding 降维配置 ==========
+    # 降维策略：pca / none
+    emb_reducer: str = "pca"
+    # PCA目标维度："auto" -> min(n_samples, n_features)
+    # 或指定整数如 128, 256
+    emb_n_components: str = "auto"
+    # 降维前是否先标准化
+    emb_standardize_first: bool = True
+
+    # ========== 表格数据填补配置 ==========
+    # 填补策略：median / mean / most_frequent / zero
+    tab_impute_strategy: str = "median"
+
+    # ========== 全局 ==========
+    # 是否启用预处理
+    enabled: bool = True
 
 
 @dataclass
