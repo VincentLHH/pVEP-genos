@@ -80,7 +80,10 @@ class HealthResponse(BaseModel):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用启动/关闭生命周期管理。"""
-    print(f"[API Service] ✅ Ready on {args.host}:{args.port}")
+    # _args_holder 在 run_server() 里已填充，在 uvicorn worker 进程中均可访问
+    host = _args_holder.get("host", "0.0.0.0")
+    port = _args_holder.get("port", 8000)
+    print(f"[API Service] ✅ Ready on {host}:{port}")
     yield
     print("[API Service] 🔻 Shutting down...")
 
