@@ -41,6 +41,7 @@ def _worker(
     device: str,
     model_cfg: dict,
     vcf_path: str,
+    bed_path: str,
     regions: List[tuple],
     ref_fasta: str,
     window_size: int,
