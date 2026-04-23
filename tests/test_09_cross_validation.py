@@ -29,8 +29,8 @@ pytest tests/test_09_cross_validation.py -v
 pytest tests/test_09_cross_validation.py -v -k "not real"
 """
 
-import gzip
 import os
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -172,15 +172,19 @@ def make_mock_data(test_case):
                 f"{chrom}\t{v.pos}\t.\t{v.ref}\t{v.alt}\t.\t.\t.\tGT\t{gt_field}"
             )
 
+        # 注意：tabix 要求 bgzip 压缩（与标准 gzip 不完全兼容），必须用 pysam.bgzip
+        # 不能用 gzip.open()，否则 tabix_index 报 "building of index ... failed"
+        vcf_uncompressed = os.path.join(tmpdir, "variants.vcf")
         vcf_path = os.path.join(tmpdir, "variants.vcf.gz")
-        with gzip.open(vcf_path, "wt") as f:
+        with open(vcf_uncompressed, "w") as f:
             f.write("\n".join(vcf_lines) + "\n")
-        # 创建索引（genvarloader 需要 .tbi）
-        pysam.tabix_index(vcf_path, preset="vcf")
+        # pysam.tabix_index 会自动调用 bgzip 压缩，再建立 .tbi 索引
+        pysam.tabix_index(vcf_uncompressed, preset="vcf", force=True)
+        # 压缩后的文件会被命名为 .vcf.gz
+        assert os.path.exists(vcf_path), f"tabix_index did not produce {vcf_path}"
 
         # ── 复制到持久路径（pytest fixture 需要持久化）──
         persist_dir = tempfile.mkdtemp(prefix="xval_persist_")
-        import shutil
         persist_fasta = os.path.join(persist_dir, "ref.fa")
         shutil.copy(fasta_path, persist_fasta)
         if os.path.exists(fasta_path + ".fai"):
