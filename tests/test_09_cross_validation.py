@@ -133,9 +133,20 @@ def make_mock_data(test_case):
 
         # ── BED ──────────────────────────────────────────────────────────────
         # 窗口：以 center_pos 为中心，左右各 HALF bp
+        # ⚠️ 注意：INDEL 场景下，builtin SequenceBuilder 的窗口右边界会补 len(ref)-1
+        # （右边界 = pos + HALF + len(ref) - 1），以确保 INDEL 的完整 ref 落在窗口内。
+        # GVL 永远用固定长度 2*HALF+1 从 BED 起始坐标开始取，
+        # 因此 BED 的 end 坐标也需要补 len(ref)-1，才能与 builtin 取到完全相同的区间。
         center_pos = test_case["pos"]
+        if "ref" in test_case:
+            ref_len = len(test_case["ref"])
+        elif "variants" in test_case:
+            # 多 variant 场景：取第一个 variant 的 ref 长度（SNP 都为 1）
+            ref_len = len(test_case["variants"][0][1])
+        else:
+            ref_len = 1  # 默认 SNP 场景
         win_start = max(1, center_pos - HALF)   # 1-based, inclusive
-        win_end = center_pos + HALF              # 1-based, inclusive
+        win_end = center_pos + HALF + ref_len - 1  # 1-based, inclusive (补 ref_len-1)
 
         bed_path = os.path.join(tmpdir, "regions.bed")
         with open(bed_path, "w") as f:
@@ -345,18 +356,12 @@ class TestCrossValidationMockINDEL:
         assert builtin_result is not None, f"builtin None: {tc['desc']}"
         assert gvl_result is not None, f"gvl None: {tc['desc']}"
 
-        # INDEL 序列长度可能不同（因为 indel 长度不同），
-        # 但 genvarloader 和 builtin 看到相同的 ref/alt，结果应一致
+        # INDEL 序列必须完全一致（因为两者取到了相同的基因组区间）
         b_hap1 = builtin_result["hap1"]["mut_seq"]
         g_hap1 = gvl_result["hap1"]["mut_seq"]
         b_hap2 = builtin_result["hap2"]["mut_seq"]
         g_hap2 = gvl_result["hap2"]["mut_seq"]
 
-        # ── 判断 indel 类型 ──────────────────────────────────────────────────
-        is_del = len(tc["ref"]) > len(tc["alt"])
-        is_ins = len(tc["alt"]) > len(tc["ref"])
-
-        # ── 长度不一致处理 ───────────────────────────────────────────────────
         if len(b_hap1) != len(g_hap1) or len(b_hap2) != len(g_hap2):
             print(
                 f"\n⚠️  [{tc['desc']}] Length diff detected:\n"
@@ -365,62 +370,10 @@ class TestCrossValidationMockINDEL:
                 f"  builtin hap2 len={len(b_hap2)}: {b_hap2}\n"
                 f"  gvl     hap2 len={len(g_hap2)}: {g_hap2}"
             )
-
-            if is_del:
-                # ── DEL 场景 ──────────────────────────────────────────────────
-                # Builtin builder 额外延伸窗口来「装」DEL（右边界 += len(REF)-1），
-                # DEL 之后的多余碱基留在窗口内「撑长度」，这是 builtin 的 padding 策略。
-                # GVL 按 VCF 语义严格处理：DEL allele 直接删掉对应碱基，序列自然变短。
-                # 两者都是正确的，test 改为验证 DEL 等位基因是否正确应用。
-                #
-                # 验证策略：对于每个 hap，检查 ALT 和 REF 等位基因是否出现在正确位置
-                alt_seq = tc["alt"]   # DEL 时为保留碱基（单个）
-                ref_seq = tc["ref"]   # DEL 时为被删碱基
-
-                # hap1 对应 gt[0]，hap2 对应 gt[1]
-                allele1, allele2 = tc["gt"][0], tc["gt"][1]
-
-                # 检查 hap1 是否携带 ALT（而非 REF）
-                hap1_should_be_alt = (allele1 == 1)
-                hap1_should_be_ref = (allele1 == 0)
-                hap2_should_be_alt = (allele2 == 1)
-                hap2_should_be_ref = (allele2 == 0)
-
-                # 对于 DEL，ALT hap 不含 ref_seq（删掉了），REF hap 含完整 ref_seq
-                if hap1_should_be_alt:
-                    assert ref_seq not in g_hap1, \
-                        f"[{tc['desc']}] hap1 (ALT) should NOT contain deleted REF '{ref_seq}': {g_hap1}"
-                    # ALT 碱基应出现在窗口内（DEL 的位置）
-                    assert alt_seq in g_hap1, \
-                        f"[{tc['desc']}] hap1 (ALT) should contain ALT '{alt_seq}': {g_hap1}"
-                if hap1_should_be_ref:
-                    assert ref_seq in g_hap1, \
-                        f"[{tc['desc']}] hap1 (REF) should contain REF '{ref_seq}': {g_hap1}"
-
-                if hap2_should_be_alt:
-                    assert ref_seq not in g_hap2, \
-                        f"[{tc['desc']}] hap2 (ALT) should NOT contain deleted REF '{ref_seq}': {g_hap2}"
-                    assert alt_seq in g_hap2, \
-                        f"[{tc['desc']}] hap2 (ALT) should contain ALT '{alt_seq}': {g_hap2}"
-                if hap2_should_be_ref:
-                    assert ref_seq in g_hap2, \
-                        f"[{tc['desc']}] hap2 (REF) should contain REF '{ref_seq}': {g_hap2}"
-
-                print(f"  ✅ [{tc['desc']}] DEL alleles verified correctly (length diff is expected)")
-
-            else:
-                # ── INS 或其他长度差异（理论上不应发生）：严格断言 ──────────
-                assert len(b_hap1) == len(g_hap1), \
-                    f"[{tc['desc']}] hap1 length mismatch: builtin={len(b_hap1)}, gvl={len(g_hap1)}"
-                assert len(b_hap2) == len(g_hap2), \
-                    f"[{tc['desc']}] hap2 length mismatch: builtin={len(b_hap2)}, gvl={len(g_hap2)}"
-
-        else:
-            # 长度相等时，做完整的 exact 比对
-            assert b_hap1 == g_hap1, \
-                f"[{tc['desc']}] hap1 mismatch:\n  builtin: {b_hap1}\n  gvl:     {g_hap1}"
-            assert b_hap2 == g_hap2, \
-                f"[{tc['desc']}] hap2 mismatch:\n  builtin: {b_hap2}\n  gvl:     {g_hap2}"
+        assert b_hap1 == g_hap1, \
+            f"[{tc['desc']}] hap1 mismatch:\n  builtin: {b_hap1}\n  gvl:     {g_hap1}"
+        assert b_hap2 == g_hap2, \
+            f"[{tc['desc']}] hap2 mismatch:\n  builtin: {b_hap2}\n  gvl:     {g_hap2}"
 
         print(f"✅ [{tc['desc']}] INDEL hap sequences match")
 
