@@ -222,6 +222,7 @@ def run_multi_gpu(
                     device=device,
                     model_cfg=model_cfg,
                     vcf_path=vcf_path,
+                    bed_path=bed_path,
                     regions=regions,
                     ref_fasta=ref_fasta,
                     window_size=window_size,

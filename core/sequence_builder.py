@@ -91,23 +91,10 @@ class SequenceBuilder:
 
             pos_in_seq = v.pos - left + shift
 
-            # 🔥 强化 debug
-            print(f"\n[DEBUG] applying variant {v.id}")
-            print(f"   hap{hap_index} | allele={allele}")
-            print(f"   genomic pos = {v.pos}")
-            print(f"   pos_in_seq = {pos_in_seq}")
-            print(f"   shift = {shift}")
-            print(f"   expected REF = {ref}")
-            print(f"   seq context = {seq[max(0, pos_in_seq - 5):pos_in_seq + len(ref) + 5]}")
-
             current = seq[pos_in_seq:pos_in_seq + len(ref)]
 
-            # 🔥 严格校验
+            # 严格校验 REF 匹配
             if current != ref:
-                print(f"   ❌ MISMATCH!")
-                print(f"   expected: {ref}")
-                print(f"   got     : {current}")
-                print(f"   full seq: {seq}")
                 continue
 
             # 替换
