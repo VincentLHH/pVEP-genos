@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# 输出目录（运行产物，不入库）
+outputs/
+
+# WorkBuddy 工作记忆（本地 AI 助手状态，不入库）
+.workbuddy/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# macOS
+.DS_Store
+
+# 数据 / 模型权重（通常太大）
+*.h5
+*.pt
+*.pth
+*.ckpt
+*.safetensors

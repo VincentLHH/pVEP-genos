@@ -1,0 +1,33 @@
+vcf_path: /home/share/huadjyin/home/liuhaohan/genos/vcfs/Final_sig_snps_32k_window_400.vcf.gz
+bed_path: /home/share/huadjyin/home/liuhaohan/genos/test-emb/GWAS_TPMI_4045.bed
+ref_fasta: /home/share/huadjyin/home/liuhaohan/Ref/hg38/hg38.fa
+
+output_dir: outputs
+
+# -------------------------------------------------------
+# 模型配置
+# 多卡推理：devices 填多个 GPU（如 ["cuda:0", "cuda:1"]）
+# 单卡推理：devices 填单个（如 ["cuda:0"]），或保持 device 字段
+# -------------------------------------------------------
+model:
+  name: Genos-1.2B
+  path: /home/share/huadjyin/home/liuhaohan/genos/Genos-1.2B
+  dtype: bfloat16
+  batch_size: 32
+  # 多卡设备列表（优先使用），若为空则 fallback 到 device 字段
+  devices: []
+  # 单卡回退设备
+  device: cuda
+
+window_size: 128
+
+embedding:
+  methods: ["mean"]
+  save_interval: 50
+
+# -------------------------------------------------------
+# 输出控制（也可通过命令行参数覆盖）
+# -------------------------------------------------------
+output:
+  save_haplotypes: true   # 是否在 JSON 中保存重建的单倍型序列
+  save_embeddings: true   # 是否进行推理并保存 embedding
