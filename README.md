@@ -16,6 +16,7 @@
 - [配置说明](#配置说明)
 - [输出格式](#输出格式)
 - [测试](#测试)
+- [交叉验证](#交叉验证)
 - [多卡推理](#多卡推理)
 - [序列构建器](#序列构建器)
 
@@ -337,9 +338,38 @@ pytest tests/test_05_api_client.py -v
 
 # GPU 多卡测试（需 ≥2 GPU）
 pytest tests/test_06_multi_gpu.py -v
+
+# 交叉验证（CPU 节点，有 genvarloader）：比对 builtin vs genvarloader 序列重建结果
+pytest tests/test_09_cross_validation.py -v
+
+# 仅 mock 数据（排除真实数据抽样）
+pytest tests/test_09_cross_validation.py -v -k "not real"
 ```
 
 > **跳过说明**：部分测试依赖 genvarloader 库或 GPU 节点环境，未安装时自动 skip（非失败）。
+>
+> **交叉验证测试**（`test_09`）用于验证 builtin 和 genvarloader 两种序列构建器对同一输入产生完全一致的输出。在 CPU 节点（有 genvarloader）上运行，覆盖 SNP（4 种基因型）、INDEL（DEL/INS）、多 Variant 叠加等场景。
+
+---
+
+## 交叉验证
+
+`tests/test_09_cross_validation.py` 对比 **builtin `SequenceBuilder`** 和 **genvarloader `GenVarLoaderSequenceBuilder`** 的序列重建输出是否一致，无需人工判断正确性。
+
+**在 CPU 节点（有 genvarloader）上运行**，自动生成配套的 mock VCF + FASTA + BED，对齐两个 builder 的输入，保证比对公平。
+
+**测试场景**：
+
+| 场景 | 说明 |
+|------|------|
+| SNP homo ALT | 纯合变异，两条单倍型均为 ALT |
+| SNP hetero (1\|0) | 杂合，hap1=ALT / hap2=REF |
+| SNP hetero (0\|1) | 杂合，hap1=REF / hap2=ALT |
+| INDEL DEL/INS | 3bp 缺失、3bp 插入、6bp 缺失 |
+| Multi-Variant | 窗口内 2 个 SNP（同/异单倍型叠加） |
+| 真实数据 | 随机抽样真实 VCF/BED/FASTA 的 region，验证端到端一致性 |
+
+**比对字段**：`hap1.mut_seq`、`hap2.mut_seq`、`ref_seq`
 
 ---
 
