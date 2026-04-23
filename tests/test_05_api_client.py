@@ -48,14 +48,24 @@ def api_base_url(env_api_url):
 
 
 @pytest.fixture(scope="session")
-def api_reachable(api_base_url):
-    """确保 API 服务可访问"""
+def api_reachable(api_base_url, request):
+    """确保 API 服务可访问；不可达时 skip"""
     try:
         client = EmbeddingAPIClient(base_url=api_base_url, timeout=5)
         health = client.health()
         return health
     except Exception as e:
-        pytest.skip(f"API not reachable at {api_base_url}: {e}", allow_module_level=True)
+        pytest.skip(f"API not reachable at {api_base_url}: {e}")
+
+
+@pytest.fixture
+def api_health(api_base_url):
+    """基础连接检查：server 不可达则 skip"""
+    import httpx
+    try:
+        httpx.get(f"{api_base_url}/health", timeout=5)
+    except Exception as e:
+        pytest.skip(f"API not reachable at {api_base_url}: {e}")
 
 
 @pytest.fixture
@@ -105,7 +115,7 @@ class TestAPIClientConstruction:
         """model_name property 代理 health()"""
         assert api_client.model_name == "Genos-1.2B"
 
-    def test_context_manager(self, api_base_url):
+    def test_context_manager(self, api_base_url, api_health):
         """支持 with 语法"""
         with EmbeddingAPIClient(base_url=api_base_url, timeout=30) as client:
             health = client.health()
@@ -203,7 +213,7 @@ class TestAPIClientMulti:
         assert client._default_url == api_base_url
         print("MultiEmbeddingAPIClient: created with single base_url")
 
-    def test_multi_get_embeddings(self, api_base_url):
+    def test_multi_get_embeddings(self, api_base_url, api_health):
         """MultiEmbeddingAPIClient.bulk_get_embeddings 透传"""
         client = MultiEmbeddingAPIClient(base_url=api_base_url, timeout=30)
         result = client.get_embeddings({"s1": "ACGT" * 16}, methods=["mean"])

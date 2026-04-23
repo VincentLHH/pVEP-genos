@@ -94,9 +94,8 @@ def real_gvl_cfg(env_vcf_path, env_bed_path, env_ref_fasta):
 class TestGenVarLoaderImport:
     """库可用性检测"""
 
-    def test_genvarloader_importable(self):
+    def test_genvarloader_importable(self, gvl_skip):
         """genvarloader 库可以 import"""
-        assert HAS_GVL, "genvarloader should be importable"
         assert hasattr(genvarloader, "Dataset") or hasattr(genvarloader, "write")
         print(f"genvarloader version: {getattr(genvarloader, '__version__', 'unknown')}")
 

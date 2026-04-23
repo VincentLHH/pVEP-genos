@@ -41,7 +41,7 @@ def _worker(
     device: str,
     model_cfg: dict,
     vcf_path: str,
-    bed_path: str,
+    regions: List[tuple],
     ref_fasta: str,
     window_size: int,
     output_dir: str,
@@ -124,6 +124,21 @@ def _worker(
         raise
 
 
+def _load_bed(bed_path: str) -> List[tuple]:
+    """加载 BED 文件，返回 [(chrom, start, end), ...] 列表（0-indexed, half-open）。"""
+    regions = []
+    with open(bed_path) as f:
+        for line in f:
+            if line.startswith("#") or not line.strip():
+                continue
+            parts = line.strip().split()
+            chrom = parts[0]
+            start = int(parts[1])
+            end = int(parts[2])
+            regions.append((chrom, start, end))
+    return regions
+
+
 def _load_variants(vcf, regions, sample_name):
     """从 VCF 中提取指定样本在 regions 内的非 ref 变异。"""
     from core.variant import Variant
@@ -175,6 +190,10 @@ def run_multi_gpu(
     """
     n = len(devices)
 
+    # 加载 BED regions
+    regions = _load_bed(bed_path)
+    print(f"📋 Loaded {len(regions)} regions from {bed_path}")
+
     # 按 round-robin 分桶
     buckets: List[List[str]] = [[] for _ in range(n)]
     for i, name in enumerate(sample_names):
@@ -203,7 +222,7 @@ def run_multi_gpu(
                     device=device,
                     model_cfg=model_cfg,
                     vcf_path=vcf_path,
-                    bed_path=bed_path,
+                    regions=regions,
                     ref_fasta=ref_fasta,
                     window_size=window_size,
                     output_dir=output_dir,

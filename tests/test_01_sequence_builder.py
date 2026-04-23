@@ -106,8 +106,10 @@ class TestBuiltinSequenceBuilder:
 
         assert_seq_len_nontrivial(hap1)
         assert_seq_len_nontrivial(hap2)
-        assert hap1[24] == "T", f"hap1 should have ALT at pos 25: {hap1[24]}"
-        assert hap2[24] == seq[24], f"hap2 should have REF at pos 25"
+        # hap_seq 是居中窗口 (2*half_window+1=41bp)，variant 永远落在 pos_in_seq=20
+        HALF = 20  # 方便统一索引
+        assert hap1[HALF] == "T", f"hap1 should have ALT at center (index {HALF}): {hap1[HALF]}"
+        assert hap2[HALF] == seq[24], f"hap2 should have REF at center (index {HALF})"
         assert_haps_differ(hap1, hap2)
         print(f"✅ SNP heterozygous: hap1={hap1[:30]}..., hap2={hap2[:30]}...")
 
@@ -124,7 +126,8 @@ class TestBuiltinSequenceBuilder:
 
         # 纯合 → 两条单倍型应完全相同
         assert hap1 == hap2, "homozygous alt: hap1 should equal hap2"
-        assert hap1[29] == "G", f"hap1 should have ALT at pos 30: {hap1[29]}"
+        HALF = 20  # variant always lands at center of window
+        assert hap1[HALF] == "G", f"hap1 should have ALT at center (index {HALF}): {hap1[HALF]}"
         print(f"✅ SNP homozygous alt: hap={hap1[:30]}...")
 
     def test_snp_heterozygous_0_1(self, builder, simple_fasta):
@@ -137,8 +140,10 @@ class TestBuiltinSequenceBuilder:
         hap1 = result["hap1"]["mut_seq"]
         hap2 = result["hap2"]["mut_seq"]
 
-        assert hap1[29] == seq[29], "hap1 (allele=0) should carry REF"
-        assert hap2[29] == "C", "hap2 (allele=1) should carry ALT"
+        # variant always lands at center (index=20) regardless of genomic position
+        HALF = 20
+        assert hap1[HALF] == seq[29], f"hap1 (allele=0) should carry REF at center: {hap1[HALF]}"
+        assert hap2[HALF] == "C", f"hap2 (allele=1) should carry ALT at center: {hap2[HALF]}"
         assert_haps_differ(hap1, hap2)
         print(f"✅ SNP (0|1): passed")
 
@@ -164,10 +169,11 @@ class TestBuiltinSequenceBuilder:
         print(f"✅ Insertion: hap1_len={len(hap1)}, hap2_len={len(hap2)}")
 
     def test_deletion(self, builder, simple_fasta):
-        """缺失: GT -> G (1|0)"""
-        seq = "ACGT" * 20
-        # GT = seq[20:22]
-        v = Variant("chr1", 21, "GT", "G", (1, 0))
+        """缺失: 3bp deletion (1|0)"""
+        seq = "ACGT" * 75
+        # Deleting 3bp starting at seq[20:23] = "ACG"
+        ref_to_delete = seq[20:23]  # "ACG"
+        v = Variant("chr1", 25, ref_to_delete, ref_to_delete[0], (1, 0))
 
         result = builder.build(v, [v])
 
