@@ -28,6 +28,7 @@ import traceback
 
 from core.sample import Sample
 from core.sequence_builder import SequenceBuilder
+from core.genvarloader_builder import GenVarLoaderSequenceBuilder
 from models.embedding_manager import EmbeddingManager
 
 
@@ -40,10 +41,12 @@ def _worker(
     device: str,
     model_cfg: dict,
     vcf_path: str,
-    regions: list,
+    bed_path: str,
     ref_fasta: str,
     window_size: int,
     output_dir: str,
+    seq_builder_type: str,
+    seq_builder_cfg: dict,
     methods: List[str],
     save_interval: int,
     save_haplotypes: bool,
@@ -59,7 +62,19 @@ def _worker(
 
     try:
         # ----- 构建 sequence builder -----
-        builder = SequenceBuilder(ref_fasta, window_size=window_size)
+        if seq_builder_type == "genvarloader":
+            builder = GenVarLoaderSequenceBuilder(
+                vcf_path=vcf_path,
+                bed_path=bed_path,
+                ref_fasta=ref_fasta,
+                gvl_cache_dir=seq_builder_cfg.get("gvl_cache_dir", "/tmp/gvl_cache"),
+                strandaware=seq_builder_cfg.get("gvl_strandaware", True),
+                max_mem=seq_builder_cfg.get("gvl_max_mem", "4g"),
+            )
+            print(f"[GPU {rank}]    🔧 Using GenVarLoaderSequenceBuilder")
+        else:
+            builder = SequenceBuilder(ref_fasta, window_size=window_size)
+            print(f"[GPU {rank}]    🔧 Using built-in SequenceBuilder")
 
         # ----- 加载模型（注入共享 cache）-----
         manager_obj = EmbeddingManager(
@@ -69,23 +84,28 @@ def _worker(
             dtype=model_cfg.get("dtype", "bfloat16"),
             batch_size=model_cfg["batch_size"],
             shared_cache=shared_cache,  # ← 注入全局共享 cache
+            mode=model_cfg.get("mode", "local"),
         )
 
         # ----- 打开 VCF（每个子进程独立 file handle）-----
         vcf = pysam.VariantFile(vcf_path)
 
         for sample_name in sample_names:
-            print(f"[GPU {rank}] 📂 Processing {sample_name}")
-
-            variants = _load_variants(vcf, regions, sample_name)
-            print(f"[GPU {rank}]    🧬 {len(variants)} variants")
-
             sample = Sample(
                 sample_name,
                 output_dir,
                 save_haplotypes=save_haplotypes,
                 save_embeddings=save_embeddings,
             )
+
+            # 样本级断点续存
+            if sample.is_complete([], model_cfg["name"]):
+                print(f"[GPU {rank}] ⏭  [{sample_name}] 完整结果已存在，跳过")
+                continue
+
+            print(f"[GPU {rank}] 📂 Processing {sample_name}")
+            variants = _load_variants(vcf, regions, sample_name)
+            print(f"[GPU {rank}]    🧬 {len(variants)} variants")
 
             sample.process_all(
                 variants,
@@ -136,10 +156,12 @@ def run_multi_gpu(
     devices: List[str],
     model_cfg: dict,
     vcf_path: str,
-    regions: list,
+    bed_path: str,
     ref_fasta: str,
     window_size: int,
     output_dir: str,
+    seq_builder_type: str,
+    seq_builder_cfg: dict,
     methods: List[str],
     save_interval: int,
     save_haplotypes: bool,
@@ -181,10 +203,12 @@ def run_multi_gpu(
                     device=device,
                     model_cfg=model_cfg,
                     vcf_path=vcf_path,
-                    regions=regions,
+                    bed_path=bed_path,
                     ref_fasta=ref_fasta,
                     window_size=window_size,
                     output_dir=output_dir,
+                    seq_builder_type=seq_builder_type,
+                    seq_builder_cfg=seq_builder_cfg,
                     methods=methods,
                     save_interval=save_interval,
                     save_haplotypes=save_haplotypes,

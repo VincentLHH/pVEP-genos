@@ -1,20 +1,27 @@
 import torch
 from transformers import AutoTokenizer, AutoModel
 from typing import List, Dict, Optional
-from collections import defaultdict
+
+from api.client import EmbeddingAPIClient
 
 
 class EmbeddingManager:
     """
-    单卡 embedding 推理器。
+    Embedding 推理管理器，支持两种运行模式：
 
-    改进点
-    ------
-    1. cache 可由外部注入（multiprocessing.Manager().dict()），
-       支持多卡进程间全局共享。
-    2. 新增 bulk_get_embeddings()：接受 {任意key: seq} 的大字典，
-       一次性去重 + batch 推理，不再逐样本调用。
-    3. 原 get_embeddings() 保持兼容，内部走同一 _run_batch_inference。
+    mode = "local"（默认）
+        在本机 GPU 上推理（torch + transformers）。
+        cache 存储在进程本地 dict（或外部传入的共享 dict）。
+
+    mode = "api"
+        通过 HTTP 调用远程推理服务（GPU 节点部署的 api.service）。
+        cache 完全由服务端管理，本地只做透传。
+        适合从无 GPU 节点调用 GPU 服务器。
+
+    接口
+    ----
+    bulk_get_embeddings(seq_dict, methods) → {key: {method: [float]}}
+        两种模式接口完全对齐，调用方无感知。
     """
 
     def __init__(
@@ -24,43 +31,62 @@ class EmbeddingManager:
         device: str = "cuda",
         dtype: str = "bfloat16",
         batch_size: int = 8,
-        shared_cache: Optional[dict] = None,   # ← 多卡共享 cache 注入口
+        shared_cache: Optional[dict] = None,
+        # ──────── API 模式扩展参数 ────────
+        mode: str = "local",
+        api_base_url: Optional[str] = None,
     ):
         self.model_name = model_name
         self.model_path = model_path
         self.device = device
         self.batch_size = batch_size
+        self.mode = mode
+        self.api_base_url = api_base_url
 
-        # 🔥 全局 cache：key=(seq, method) → list[float]
-        #    若外部注入则用共享 dict，否则进程本地 dict
-        self.cache: dict = shared_cache if shared_cache is not None else {}
+        # 本地 GPU 模式：初始化模型
+        if self.mode == "local":
+            self.cache: dict = shared_cache if shared_cache is not None else {}
 
-        if dtype == "bfloat16":
-            self.torch_dtype = torch.bfloat16
-        elif dtype == "float16":
-            self.torch_dtype = torch.float16
+            if dtype == "bfloat16":
+                self.torch_dtype = torch.bfloat16
+            elif dtype == "float16":
+                self.torch_dtype = torch.float16
+            else:
+                self.torch_dtype = torch.float32
+
+            print(
+                f"🔄 Loading model [{model_name}] on {device} "
+                f"from {model_path}..."
+            )
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                model_path, trust_remote_code=True
+            )
+
+            self.model = AutoModel.from_pretrained(
+                model_path,
+                torch_dtype=self.torch_dtype,
+                trust_remote_code=True,
+                attn_implementation=(
+                    "flash_attention_2" if device.startswith("cuda") else None
+                ),
+            ).to(device)
+
+            self.model.eval()
+            print(f"✅ Model [{model_name}] loaded on {device}")
+
+        # API 模式：初始化 HTTP 客户端
+        elif self.mode == "api":
+            if not api_base_url:
+                raise ValueError("api_base_url is required when mode='api'")
+            self._api_client = EmbeddingAPIClient(base_url=api_base_url)
+            self.cache: dict = {}   # API 模式 cache 由服务端管理
+            print(f"🌐 EmbeddingManager (API mode) → {api_base_url}")
+
         else:
-            self.torch_dtype = torch.float32
-
-        print(f"🔄 Loading model [{model_name}] on {device} from {model_path}...")
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            model_path, trust_remote_code=True
-        )
-
-        self.model = AutoModel.from_pretrained(
-            model_path,
-            torch_dtype=self.torch_dtype,
-            trust_remote_code=True,
-            attn_implementation=(
-                "flash_attention_2" if device.startswith("cuda") else None
-            ),
-        ).to(device)
-
-        self.model.eval()
-        print(f"✅ Model [{model_name}] loaded on {device}")
+            raise ValueError(f"Unknown mode: {mode!r}, expected 'local' or 'api'")
 
     # =========================================================
-    # pooling
+    # pooling（仅 local 模式使用）
     # =========================================================
     def _pool(self, hidden: torch.Tensor, mask: torch.Tensor, method: str):
         if method == "last_token":
@@ -84,7 +110,7 @@ class EmbeddingManager:
             raise ValueError(f"Unknown pooling method: {method}")
 
     # =========================================================
-    # 底层 tokenize + 前向
+    # 底层 tokenize + 前向（仅 local 模式使用）
     # =========================================================
     def _encode_batch(self, sequences: List[str]):
         inputs = self.tokenizer(
@@ -100,18 +126,14 @@ class EmbeddingManager:
         return outputs.last_hidden_state, inputs["attention_mask"]
 
     # =========================================================
-    # 核心：对一组去重序列做 batch 推理，结果写入 cache
+    # 本地推理核心（仅 local 模式）
     # =========================================================
     def _run_batch_inference(
         self,
         unique_seqs: List[str],
         methods: List[str],
     ) -> None:
-        """
-        对 unique_seqs 中尚未命中 cache 的序列做 batch 推理，
-        推理结果写入 self.cache。
-        """
-        # 过滤掉已经全部命中的序列
+        """对尚未命中 cache 的序列做 batch 推理，结果写入 self.cache。"""
         to_infer = [
             s for s in unique_seqs
             if any((s, m) not in self.cache for m in methods)
@@ -141,9 +163,7 @@ class EmbeddingManager:
                         self.cache[cache_key] = vec
 
     # =========================================================
-    # 🔥 新接口：bulk 批推理
-    #    输入: {key: seq, ...}（可跨多个 variant，量级可以很大）
-    #    输出: {key: {method: [float, ...]}, ...}
+    # 🔥 统一入口
     # =========================================================
     def bulk_get_embeddings(
         self,
@@ -151,19 +171,37 @@ class EmbeddingManager:
         methods: List[str] = ["mean"],
     ) -> Dict[str, Dict[str, list]]:
         """
-        跨 variant / 跨样本的统一 batch 推理入口。
-        先全局去重，再一次性送入 GPU，最后按 key 重新分发结果。
+        跨 variant / 跨样本的统一推理入口。
+        local  模式：本地 GPU 推理，支持 cache 命中。
+        api    模式：HTTP 请求远程服务（服务端维护 cache）。
+
+        输入
+        ----
+        seq_dict : {flat_key: sequence_str}
+
+        返回
+        ----
+        {flat_key: {method: [float, ...]}}
         """
         if not seq_dict:
             return {}
 
-        # 1️⃣ 收集所有独立序列（去重）
-        unique_seqs = list(dict.fromkeys(seq_dict.values()))  # 保序去重
+        if self.mode == "local":
+            return self._bulk_local(seq_dict, methods)
+        else:
+            return self._bulk_api(seq_dict, methods)
 
-        # 2️⃣ 统一推理（只推尚未命中 cache 的）
+    # =========================================================
+    # local 推理路径
+    # =========================================================
+    def _bulk_local(
+        self,
+        seq_dict: Dict[str, str],
+        methods: List[str],
+    ) -> Dict[str, Dict[str, list]]:
+        unique_seqs = list(dict.fromkeys(seq_dict.values()))
         self._run_batch_inference(unique_seqs, methods)
 
-        # 3️⃣ 按 key 组装结果
         result: Dict[str, Dict[str, list]] = {}
         for key, seq in seq_dict.items():
             result[key] = {}
@@ -173,7 +211,17 @@ class EmbeddingManager:
         return result
 
     # =========================================================
-    # 兼容旧接口（逐次调用，内部也走 bulk 路径）
+    # API 推理路径
+    # =========================================================
+    def _bulk_api(
+        self,
+        seq_dict: Dict[str, str],
+        methods: List[str],
+    ) -> Dict[str, Dict[str, list]]:
+        return self._api_client.bulk_get_embeddings(seq_dict, methods)
+
+    # =========================================================
+    # 兼容旧接口
     # =========================================================
     def get_embeddings(
         self,

@@ -5,18 +5,40 @@ ref_fasta: /home/share/huadjyin/home/liuhaohan/Ref/hg38/hg38.fa
 output_dir: outputs
 
 # -------------------------------------------------------
+# 序列构建器
+# -------------------------------------------------------
+seq_builder:
+  # 构建器类型：builtin = 项目内置 Python 实现，genvarloader = GenVarLoader C扩展
+  type: builtin
+
+  # ── GenVarLoader 专用配置 ──
+  # .gvl 数据集缓存目录（不填则默认 /tmp/gvl_cache）
+  gvl_cache_dir: ""
+  # 是否对负链区域做 reverse complement（默认 True，与 builtin 一致）
+  gvl_strandaware: true
+  # gvl.write 内存上限（默认 '4g'）
+  gvl_max_mem: "4g"
+
+# -------------------------------------------------------
 # 模型配置
-# 多卡推理：devices 填多个 GPU（如 ["cuda:0", "cuda:1"]）
-# 单卡推理：devices 填单个（如 ["cuda:0"]），或保持 device 字段
 # -------------------------------------------------------
 model:
   name: Genos-1.2B
   path: /home/share/huadjyin/home/liuhaohan/genos/Genos-1.2B
   dtype: bfloat16
   batch_size: 32
-  # 多卡设备列表（优先使用），若为空则 fallback 到 device 字段
+
+  # ── 推理模式 ──
+  # local : 本机 GPU 推理（默认）
+  # api   : 通过 HTTP 调用远程推理服务
+  mode: local
+
+  # API 推理时必填：远程服务地址
+  api_base_url: ""
+
+  # ── 设备配置 ──
+  # 单卡：device 指定设备名；多卡：devices 列表（round-robin 分配样本）
   devices: []
-  # 单卡回退设备
   device: cuda
 
 window_size: 128
@@ -26,7 +48,7 @@ embedding:
   save_interval: 50
 
 # -------------------------------------------------------
-# 输出控制（也可通过命令行参数覆盖）
+# 输出控制
 # -------------------------------------------------------
 output:
   save_haplotypes: true   # 是否在 JSON 中保存重建的单倍型序列

@@ -3,26 +3,32 @@ run_pipeline.py
 ===============
 pVEP-genos 主入口。
 
-新增功能
---------
+功能
+----
 1. 真正的 batch 推理（sample.process_all 内部统一收集序列再批推理）。
 2. --save-haplotypes / --no-save-haplotypes  控制是否保存单倍型序列。
    --save-embeddings  / --no-save-embeddings 控制是否进行推理保存 embedding。
 3. 多卡推理：--devices cuda:0 cuda:1 ...
    各 GPU 独占一个子进程，全局 cache 跨进程共享（Manager.dict）。
+4. API 推理模式：--mode api --api-base-url http://gpu-node:8000
+   无 GPU 节点通过 HTTP 调用远程 GPU 服务器。
 
 用法示例
 --------
 # 单卡，默认保存一切
 python run_pipeline.py --config config/default.yaml
 
-# 多卡，不保存单倍型序列（节省磁盘），只保存 embedding
-python run_pipeline.py --config config/default.yaml \\
-    --devices cuda:0 cuda:1 cuda:2 cuda:3 \\
+# 多卡，不保存单倍型序列
+python run_pipeline.py --config config/default.yaml \
+    --devices cuda:0 cuda:1 cuda:2 cuda:3 \
     --no-save-haplotypes
 
-# 只构建序列，不推理（用于 debug 序列构建）
+# 只构建序列，不推理（debug）
 python run_pipeline.py --config config/default.yaml --no-save-embeddings
+
+# API 模式（无 GPU 节点，调用远程服务）
+python run_pipeline.py --config config/default.yaml \
+    --mode api --api-base-url http://192.168.1.100:8000
 """
 
 import yaml
@@ -33,6 +39,7 @@ from tqdm import tqdm
 from core.sample import Sample
 from core.variant import Variant
 from core.sequence_builder import SequenceBuilder
+from core.genvarloader_builder import GenVarLoaderSequenceBuilder
 from models.embedding_manager import EmbeddingManager
 
 
@@ -45,16 +52,40 @@ def parse_args():
     )
     parser.add_argument("--config", required=True, help="YAML 配置文件路径")
 
-    # 多卡覆盖（优先级高于 config 中的 devices 字段）
+    # ── 推理模式 ──
+    parser.add_argument(
+        "--mode",
+        choices=["local", "api"],
+        default=None,
+        dest="mode",
+        help="推理方式：local=本机 GPU，api=调用远程 API 服务（默认由 config 决定）",
+    )
+    parser.add_argument(
+        "--api-base-url",
+        dest="api_base_url",
+        default=None,
+        help="API 服务地址，例如 http://192.168.1.100:8000（mode=api 时必须）",
+    )
+
+    # ── 序列构建器 ──
+    parser.add_argument(
+        "--seq-builder",
+        choices=["builtin", "genvarloader"],
+        default=None,
+        dest="seq_builder",
+        help="序列构建方式：builtin=内置 Python 实现，genvarloader=GenVarLoader C扩展（更快，默认由 config 决定）",
+    )
+
+    # ── 多卡覆盖（仅 local 模式有效）──
     parser.add_argument(
         "--devices",
         nargs="+",
         default=None,
         metavar="DEVICE",
-        help="使用的 GPU 列表，例如 --devices cuda:0 cuda:1（覆盖 config）",
+        help="使用的 GPU 列表，例如 --devices cuda:0 cuda:1（覆盖 config，仅 local 模式）",
     )
 
-    # 保存控制（--no-* 形式显式关闭）
+    # ── 保存控制 ──
     parser.add_argument(
         "--save-haplotypes",
         dest="save_haplotypes",
@@ -132,14 +163,28 @@ def load_variants(vcf, regions, sample_name):
 
 
 # =========================
-# 🔹 resolve 运行时参数
+# 🔹 resolve 参数
 # =========================
-def resolve_flags(args, cfg):
-    """
-    命令行参数优先级 > config 文件 > 默认值（True）。
-    """
-    output_cfg = cfg.get("output", {})
+def resolve_mode(args, cfg) -> str:
+    mode = args.mode if args.mode else cfg.get("model", {}).get("mode", "local")
+    if mode not in ("local", "api"):
+        raise ValueError(f"mode must be 'local' or 'api', got {mode!r}")
+    return mode
 
+
+def resolve_api_base_url(args, cfg, mode: str) -> str:
+    if mode == "api":
+        url = args.api_base_url or cfg.get("model", {}).get("api_base_url")
+        if not url:
+            raise ValueError(
+                "API mode requires --api-base-url or config.model.api_base_url"
+            )
+        return url
+    return ""
+
+
+def resolve_flags(args, cfg):
+    output_cfg = cfg.get("output", {})
     save_haplotypes = (
         args.save_haplotypes
         if args.save_haplotypes is not None
@@ -153,46 +198,88 @@ def resolve_flags(args, cfg):
     return save_haplotypes, save_embeddings
 
 
+def resolve_seq_builder_type(args, cfg) -> str:
+    """返回 'builtin' 或 'genvarloader'。"""
+    if args.seq_builder:
+        return args.seq_builder
+    return cfg.get("seq_builder", {}).get("type", "builtin")
+
+
+def make_builder(cfg, seq_builder_type: str):
+    """
+    工厂函数：根据 seq_builder_type 创建对应的序列构建器。
+    """
+    if seq_builder_type == "genvarloader":
+        gvl_cfg = cfg.get("seq_builder", {})
+        gvl_cache_dir = gvl_cfg.get("gvl_cache_dir", "/tmp/gvl_cache")
+        print(f"🔧 Using GenVarLoaderSequenceBuilder (cache={gvl_cache_dir})")
+        return GenVarLoaderSequenceBuilder(
+            vcf_path=cfg["vcf_path"],
+            bed_path=cfg["bed_path"],
+            ref_fasta=cfg["ref_fasta"],
+            gvl_cache_dir=gvl_cache_dir or "/tmp/gvl_cache",
+            strandaware=gvl_cfg.get("gvl_strandaware", True),
+            max_mem=gvl_cfg.get("gvl_max_mem", "4g"),
+        )
+    else:
+        print("🔧 Using built-in SequenceBuilder")
+        return SequenceBuilder(
+            cfg["ref_fasta"],
+            window_size=cfg["window_size"]
+        )
+
+
 def resolve_devices(args, cfg):
-    """
-    返回要使用的设备列表。
-    命令行 --devices 优先级最高；其次 config.model.devices；
-    最后 fallback 到 config.model.device（单卡）。
-    """
     if args.devices:
         return args.devices
-
     devices_in_cfg = cfg["model"].get("devices", [])
     if devices_in_cfg:
         return devices_in_cfg
-
     return [cfg["model"].get("device", "cuda")]
 
 
 # =========================
-# 🔹 单卡主流程
+# 🔹 EmbeddingManager 工厂
 # =========================
-def run_single(cfg, devices, save_haplotypes, save_embeddings):
+def make_manager(cfg, device: str, api_base_url: str = ""):
+    common = dict(
+        model_name=cfg["model"]["name"],
+        batch_size=cfg["model"]["batch_size"],
+    )
+    if api_base_url:
+        return EmbeddingManager(
+            **common,
+            model_path="",         # API 模式不需要本地模型路径
+            device="cpu",
+            mode="api",
+            api_base_url=api_base_url,
+        )
+    else:
+        return EmbeddingManager(
+            **common,
+            model_path=cfg["model"]["path"],
+            device=device,
+            dtype=cfg["model"].get("dtype", "bfloat16"),
+            mode="local",
+        )
+
+
+# =========================
+# 🔹 单卡主流程（local 或 api 模式共用）
+# =========================
+def run_single(cfg, devices, seq_builder_type, mode, api_base_url, save_haplotypes, save_embeddings):
     device = devices[0]
-    print(f"▶️  Single-GPU mode on {device}")
+    mode_label = "API" if mode == "api" else f"Single-GPU on {device}"
+    print(f"▶️  Mode: {mode_label}")
 
     vcf = pysam.VariantFile(cfg["vcf_path"])
     samples = list(vcf.header.samples)
     regions = load_bed(cfg["bed_path"])
 
-    builder = SequenceBuilder(cfg["ref_fasta"], window_size=cfg["window_size"])
-
-    manager = EmbeddingManager(
-        model_name=cfg["model"]["name"],
-        model_path=cfg["model"]["path"],
-        device=device,
-        dtype=cfg["model"].get("dtype", "bfloat16"),
-        batch_size=cfg["model"]["batch_size"],
-    )
+    builder = make_builder(cfg, seq_builder_type)
+    manager = make_manager(cfg, device, api_base_url)
 
     for sample_name in tqdm(samples, desc="Samples"):
-        print(f"\n🚀 Processing {sample_name}")
-
         sample = Sample(
             sample_name,
             cfg["output_dir"],
@@ -200,8 +287,13 @@ def run_single(cfg, devices, save_haplotypes, save_embeddings):
             save_embeddings=save_embeddings,
         )
 
+        # 样本级断点续存（CPU 优化，跳过已完整处理的样本）
+        if sample.is_complete([], manager.model_name):
+            print(f"\n🚀 [{sample_name}] ⏭  完整结果已存在，跳过")
+            continue
+
         variants = load_variants(vcf, regions, sample_name)
-        print(f"   🧬 {len(variants)} variants")
+        print(f"\n🚀 Processing {sample_name} | {len(variants)} variants")
 
         sample.process_all(
             variants,
@@ -213,9 +305,9 @@ def run_single(cfg, devices, save_haplotypes, save_embeddings):
 
 
 # =========================
-# 🔹 多卡主流程
+# 🔹 多卡主流程（仅 local 模式）
 # =========================
-def run_multi(cfg, devices, save_haplotypes, save_embeddings):
+def run_multi(cfg, devices, seq_builder_type, save_haplotypes, save_embeddings):
     from core.multi_gpu_runner import run_multi_gpu
 
     print(f"▶️  Multi-GPU mode on {devices}")
@@ -231,10 +323,12 @@ def run_multi(cfg, devices, save_haplotypes, save_embeddings):
         devices=devices,
         model_cfg=cfg["model"],
         vcf_path=cfg["vcf_path"],
-        regions=regions,
+        bed_path=cfg["bed_path"],
         ref_fasta=cfg["ref_fasta"],
         window_size=cfg["window_size"],
         output_dir=cfg["output_dir"],
+        seq_builder_type=seq_builder_type,
+        seq_builder_cfg=cfg.get("seq_builder", {}),
         methods=cfg["embedding"]["methods"],
         save_interval=cfg["embedding"]["save_interval"],
         save_haplotypes=save_haplotypes,
@@ -249,18 +343,29 @@ def main():
     args = parse_args()
     cfg = load_config(args.config)
 
+    seq_builder_type = resolve_seq_builder_type(args, cfg)
+    mode = resolve_mode(args, cfg)
+    api_base_url = resolve_api_base_url(args, cfg, mode)
     save_haplotypes, save_embeddings = resolve_flags(args, cfg)
     devices = resolve_devices(args, cfg)
 
-    print(f"📋 Config:")
-    print(f"   save_haplotypes = {save_haplotypes}")
-    print(f"   save_embeddings = {save_embeddings}")
-    print(f"   devices         = {devices}")
-
-    if len(devices) > 1:
-        run_multi(cfg, devices, save_haplotypes, save_embeddings)
+    print("📋 Config:")
+    print(f"   seq_builder      = {seq_builder_type}")
+    print(f"   mode             = {mode}")
+    if mode == "api":
+        print(f"   api_base_url     = {api_base_url}")
     else:
-        run_single(cfg, devices, save_haplotypes, save_embeddings)
+        print(f"   devices          = {devices}")
+    print(f"   save_haplotypes  = {save_haplotypes}")
+    print(f"   save_embeddings  = {save_embeddings}")
+
+    # API 模式走单卡路径（推理在远端）
+    if mode == "api":
+        run_single(cfg, ["cpu"], seq_builder_type, mode, api_base_url, save_haplotypes, save_embeddings)
+    elif len(devices) > 1:
+        run_multi(cfg, devices, seq_builder_type, save_haplotypes, save_embeddings)
+    else:
+        run_single(cfg, devices, seq_builder_type, mode, api_base_url, save_haplotypes, save_embeddings)
 
 
 if __name__ == "__main__":
