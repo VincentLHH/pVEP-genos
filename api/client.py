@@ -34,6 +34,8 @@ class EmbeddingAPIClient:
         timeout: float = 300.0,
         headers: Optional[Dict[str, str]] = None,
     ):
+        if not base_url.startswith(("http://", "https://")):
+            raise ValueError(f"base_url must start with http:// or https://, got: {base_url!r}")
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self._client: Optional[httpx.Client] = None

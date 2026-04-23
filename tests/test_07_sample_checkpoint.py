@@ -276,8 +276,9 @@ class TestSaveInterval:
         )
 
         # 构造 15 个 variant，save_interval=5
+        # 注意：pos >= 21 才不会越 half_window=20 的下界
         variants = [
-            Variant("chr1", 20 + i, seq[19 + i], "T", (1, 0))
+            Variant("chr1", 21 + i, seq[20 + i], "T", (1, 0))
             for i in range(15)
         ]
 
@@ -321,7 +322,7 @@ class TestCheckpointResume:
         # is_complete 应为 True → 不处理
         assert sample.is_complete(["v1"], "Genos-1.2B")
 
-        variants = [Variant("chr1", 20, seq[19], "T", (1, 0))]
+        variants = [Variant("chr1", 25, seq[24], "T", (1, 0))]
 
         # 手动跳过：只测 is_complete 逻辑
         if sample.is_complete(["v1"], FakeManager.model_name):

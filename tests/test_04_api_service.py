@@ -144,7 +144,7 @@ class TestAPICache:
         assert isinstance(data["size"], int)
         print(f"cache size: {data['size']}")
 
-    def test_clear_cache(self, api_base_url):
+    def test_clear_cache(self, api_base_url, api_health):
         """DELETE /cache 应清空 cache"""
         import httpx
 
@@ -227,7 +227,7 @@ class TestAPIEmbed:
         data = resp.json()
         assert data["result"] == {}
 
-    def test_cache_grows_after_requests(self, api_base_url):
+    def test_cache_grows_after_requests(self, api_base_url, api_health):
         """连续请求后 cache 应持续增长"""
         import httpx
 

@@ -27,6 +27,19 @@ export PVEPGENOS_REF_FASTA=/path/to/hg38.fa
 pytest tests/test_06_multi_gpu.py -v -s
 """
 
+
+# ─────────────────────────────────────────────────────────────
+# 多进程辅助函数（必须在模块顶层，避免 Python 3.12 spawn pickle 问题）
+# ─────────────────────────────────────────────────────────────
+def _mp_writer(shared_dict, key, value):
+    """子进程写入 shared dict"""
+    shared_dict[key] = value
+
+
+def _mp_reader(shared_dict, key):
+    """子进程读取 shared dict"""
+    return shared_dict.get(key)
+
 import os
 import sys
 import tempfile
@@ -178,18 +191,12 @@ class TestSharedCacheMechanism:
         """Manager().dict() 跨进程共享"""
         import multiprocessing as mp
 
-        def writer(shared_dict, key, value):
-            shared_dict[key] = value
-
-        def reader(shared_dict, key):
-            return shared_dict.get(key)
-
         ctx = mp.get_context("spawn")
         with mp.Manager() as mgr:
             shared = mgr.dict()
 
             # 进程 1 写入
-            p1 = ctx.Process(target=writer, args=(shared, "test_key", [1.0, 2.0, 3.0]))
+            p1 = ctx.Process(target=_mp_writer, args=(shared, "test_key", [1.0, 2.0, 3.0]))
             p1.start()
             p1.join()
             assert p1.exitcode == 0

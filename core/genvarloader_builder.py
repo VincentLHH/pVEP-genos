@@ -82,18 +82,43 @@ def _variant_key(chrom: str, pos: int, ref: str, alt: str) -> str:
 
 
 def _numpy_bytes_to_str(arr: np.ndarray) -> str:
-    """将 NDArray[np.bytes_] 或 bytes 解码为 Python str。"""
+    """
+    将 NDArray[np.bytes_]、np.uint8 或 bytes 解码为 Python str。
+
+    兼容多种输入形状：
+    - 标量 np.bytes_ / bytes
+    - 1D np.bytes_ 数组
+    - 1D np.uint8 数组（单个字节）
+    - 2D / 3D 数组（先 flatten）
+    - dtype=object 数组（genvarloader Ragged 返回值）
+    """
     if arr.ndim == 0:
-        # 标量 bytes
-        if isinstance(arr.item(), bytes):
-            return arr.item().decode("ascii")
-        return str(arr.item())
-    # 一维字节数组
-    if arr.dtype == np.bytes_ or arr.dtype == np.uint8:
-        return b"".join(arr.tobytes() if arr.dtype == np.uint8
-                        else arr).decode("ascii")
-    # 已经是一维字符数组
-    return "".join(chr(c) for c in arr.flat)
+        item = arr.item()
+        if isinstance(item, bytes):
+            return item.decode("ascii")
+        return str(item)
+
+    # 降维到一维
+    flat = np.asarray(arr).ravel()
+
+    if flat.dtype == np.bytes_:
+        return b"".join(flat).decode("ascii")
+
+    if flat.dtype == np.uint8:
+        return bytes(flat.tolist()).decode("ascii")
+
+    if flat.dtype == object:
+        # genvarloader Ragged 可能返回 Python bytes 列表
+        try:
+            return b"".join(bytes(v) if isinstance(v, (list, tuple)) else v for v in flat).decode("ascii")
+        except TypeError:
+            pass
+
+    # 兜底：整数数组（ASCII 码）
+    try:
+        return bytes(flat.tolist()).decode("ascii")
+    except Exception:
+        return "".join(str(x) for x in flat)
 
 
 def _reverse_complement(seq: str) -> str:

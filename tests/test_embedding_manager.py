@@ -2,6 +2,7 @@ def test_embedding_manager_basic():
     from models.embedding_manager import EmbeddingManager
 
     manager = EmbeddingManager(
+        model_name="Genos-1.2B",
         model_path="/home/share/huadjyin/home/liuhaohan/genos/Genos-1.2B",
         device="cuda"
     )

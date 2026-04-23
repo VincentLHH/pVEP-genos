@@ -60,7 +60,12 @@ def api_reachable(api_base_url):
 
 @pytest.fixture
 def api_client(api_base_url):
-    """每个测试使用独立的 API client"""
+    """每个测试使用独立的 API client；server 不可用时 skip"""
+    import httpx
+    try:
+        httpx.get(f"{api_base_url}/health", timeout=5)
+    except Exception as e:
+        pytest.skip(f"API not reachable at {api_base_url}: {e}", allow_module_level=True)
     client = EmbeddingAPIClient(base_url=api_base_url, timeout=120)
     yield client
     client.close()
