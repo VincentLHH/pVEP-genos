@@ -214,6 +214,16 @@ class GenVarLoaderSequenceBuilder:
             reference=self.ref_fasta,
         )
 
+        # 关键：必须显式配置返回类型。
+        # 参考用户官方脚本：dataset.with_len("ragged").with_seqs("haplotypes")
+        # - with_len("ragged"): 返回不等长单倍型（默认返回固定长度，索引行为不同）
+        # - with_seqs("haplotypes"): 返回 haplotype 数组而非 RaggedVariants 对象
+        #   否则默认 RaggedVariants.squeeze() 只接受 **kwargs，
+        #   而 genvarloader 内部 __getitem__ 传位置参数，导致报错
+        #   "takes 1 positional argument but 2 were given"
+        # 参考：https://genvarloader.readthedocs.io/en/latest/api.html
+        self._dataset = self._dataset.with_len("ragged").with_seqs("haplotypes")
+
         # 设置是否对负链做 reverse complement（与内置 builder 行为一致）
         if not self.strandaware:
             self._dataset = self._dataset.with_settings(rc_neg=False)
