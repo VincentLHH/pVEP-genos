@@ -451,3 +451,138 @@ curl -X DELETE http://localhost:8000/cache
 ### Q: 外部节点无法访问 API 服务？
 
 检查 GPU 节点防火墙/安全组是否放行了服务端口（如 `sudo iptables -I INPUT -p tcp --dport 8000 -j ACCEPT`）。
+
+---
+
+## ML应用模块
+
+利用基因组embedding + 代谢组 + 表型组进行下游分类任务。
+
+### 目录结构
+
+```
+apps/
+├── ml/                        # 🤖 机器学习模块
+│   ├── config.py              # 配置管理
+│   ├── data_loader.py         # 多组学数据加载
+│   ├── models.py              # 模型定义 (SVM/LR/XGBoost/MLP)
+│   ├── trainer.py              # 交叉验证 + 超参搜索
+│   ├── evaluator.py           # 评估指标
+│   ├── ablato.py             # 消融实验
+│   └── run_ml.py              # 主入口
+└── configs/
+    └── default_ml.yaml        # 默认配置
+```
+
+### 数据整合
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      Sample                                  │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐   │
+│  │  基因组  │  │  代谢组  │  │  表型组  │  │  分类标签 │   │
+│  │ (emb)    │  │ (表格)    │  │ (表格)   │  │ (y)      │   │
+│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬─────┘   │
+│       │             │             │             │          │
+│       ▼             ▼             ▼             ▼          │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │              Multi-omics Feature Matrix              │   │
+│  │   [emb_1...emb_n] + [metab_feat] + [pheno_feat]     │   │
+│  └─────────────────────────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 消融实验设计
+
+| 模块 | 说明 |
+|------|------|
+| `genome_only` | 只有基因组embedding |
+| `genome+metab` | 基因组 + 代谢组 |
+| `genome+pheno` | 基因组 + 表型组 |
+| `metab+pheno` | 代谢组 + 表型组 |
+| `all` | 全部模态 |
+
+### 快速开始
+
+```bash
+# 1. 配置（编辑 apps/configs/default_ml.yaml）
+vim apps/configs/default_ml.yaml
+
+# 2. 完整运行（超参搜索 + 消融实验）
+python apps/ml/run_ml.py --config apps/configs/default_ml.yaml
+
+# 3. 只跑消融实验（跳过超参搜索）
+python apps/ml/run_ml.py --config apps/configs/default_ml.yaml \
+    --no-hyperparam-search
+
+# 4. 只测试单个模态和模型
+python apps/ml/run_ml.py --config apps/configs/default_ml.yaml \
+    --modules genome_only --models xgboost
+```
+
+### 配置文件示例
+
+```yaml
+# apps/configs/default_ml.yaml
+
+# 数据源
+data:
+  emb_dir: "/path/to/embeddings"     # embedding输出目录
+  metab_file: "/path/to/metabolomics.csv"  # 代谢组CSV
+  pheno_file: "/path/to/phenotypes.csv"    # 表型组CSV
+  label_file: "/path/to/labels.csv"        # 分类标签CSV
+  sample_id_col: "sample_id"
+  label_col: "label"
+  emb_aggregation: "mean"              # mean/max
+  standardize: true
+
+# 交叉验证
+cv:
+  n_folds: 5
+  stratified: true
+  random_state: 42
+
+# 超参搜索
+hyperparam:
+  svm:
+    C: [0.01, 0.1, 1.0, 10.0]
+    kernel: [linear, rbf]
+  xgboost:
+    n_estimators: [50, 100, 200]
+    max_depth: [3, 5, 7]
+
+# 消融实验
+ablation:
+  modules: [genome_only, genome+metab, genome+pheno, all]
+  save_dir: "outputs/ablation"
+
+# 全局
+random_state: 42
+n_jobs: -1
+```
+
+### 输出说明
+
+```
+outputs/
+├── ml/
+│   ├── best_config.json              # 最佳模型配置
+│   ├── all_svm_cv_results.json       # 各实验CV结果
+│   ├── all_xgboost_params.json       # 最佳参数
+│   └── ...
+└── ablation/
+    ├── ablation_summary.csv          # 消融汇总表
+    ├── best_config.json              # 消融最佳配置
+    ├── full_ablation_results.json    # 完整结果
+    ├── ablation_comparison.png       # 对比图
+    └── genome_only_svm_cv_results.json
+```
+
+### 模型支持
+
+| 模型 | 说明 | 特点 |
+|------|------|------|
+| `svm` | 支持向量机 | 适合高维小样本 |
+| `logistic_regression` | 逻辑回归 | 可解释性强 |
+| `xgboost` | 梯度提升树 | 性能强，特征选择 |
+| `mlp` | 多层感知机 | 可捕捉非线性 |

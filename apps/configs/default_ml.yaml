@@ -1,0 +1,99 @@
+# ============================================================
+# ML应用配置示例
+# ============================================================
+
+# 数据源配置
+data:
+  # 目录结构：
+  # emb_dir/
+  #   ├── sample1/embeddings.json
+  #   ├── sample2/embeddings.json
+  #   └── ...
+  emb_dir: "/path/to/embeddings"
+  
+  # 代谢组数据（CSV，每行一个样本，每列一个代谢物）
+  metab_file: "/path/to/metabolomics.csv"
+  
+  # 表型组数据（CSV，每行一个样本，每列一个表型）
+  pheno_file: "/path/to/phenotypes.csv"
+  
+  # 分类标签（CSV，sample_id, label）
+  label_file: "/path/to/labels.csv"
+  
+  # 列名
+  sample_id_col: "sample_id"
+  label_col: "label"
+  
+  # Embedding聚合：mean（平均）/ concat（拼接）
+  emb_aggregation: "mean"
+  
+  # 是否标准化
+  standardize: true
+  
+  # 缺失值填充
+  fill_na_strategy: "median"
+
+# 交叉验证
+cv:
+  n_folds: 5
+  stratified: true
+  shuffle: true
+  random_state: 42
+
+# 超参搜索空间
+hyperparam:
+  svm:
+    C: [0.01, 0.1, 1.0, 10.0]
+    kernel: [linear, rbf]
+    gamma: [scale, auto]
+  
+  logistic_regression:
+    C: [0.01, 0.1, 1.0, 10.0]
+    penalty: [l1, l2]
+    solver: [liblinear]
+    max_iter: [1000]
+  
+  xgboost:
+    n_estimators: [50, 100, 200]
+    max_depth: [3, 5, 7]
+    learning_rate: [0.01, 0.1]
+    subsample: [0.8, 1.0]
+    colsample_bytree: [0.8, 1.0]
+  
+  mlp:
+    hidden_layer_sizes: [[128], [256], [128, 64], [256, 128]]
+    activation: [relu]
+    alpha: [0.0001, 0.001]
+    dropout: [0.0, 0.3, 0.5]
+    max_iter: [500]
+    early_stopping: [true]
+
+# 消融实验
+ablation:
+  # 可选模态组合：
+  # - genome_only:     只有基因组embedding
+  # - metab_only:      只有代谢组
+  # - pheno_only:      只有表型组
+  # - genome+metab:    基因组 + 代谢组
+  # - genome+pheno:    基因组 + 表型组
+  # - metab+pheno:     代谢组 + 表型组
+  # - all:             全部模态
+  modules:
+    - genome_only
+    - genome+metab
+    - genome+pheno
+    - all
+  
+  save_dir: "outputs/ablation"
+
+# 输出
+output:
+  save_dir: "outputs/ml"
+  save_best_params: true
+  save_predictions: true
+  save_feature_importance: true
+  verbose: 1
+
+# 全局
+random_state: 42
+n_jobs: -1
