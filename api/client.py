@@ -17,9 +17,6 @@ from typing import Dict, List, Optional
 
 import httpx
 
-from models.embedding_manager import EmbeddingManager
-
-
 class EmbeddingAPIClient:
     """
     HTTP API 客户端，复刻 EmbeddingManager.bulk_get_embeddings 接口。

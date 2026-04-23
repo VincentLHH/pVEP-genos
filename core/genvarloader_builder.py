@@ -42,16 +42,31 @@ import hashlib
 import os
 from typing import Dict, List, Optional, Tuple
 
-import genvarloader as gvl
 import numpy as np
 
 from core.variant import Variant
+
+# 延迟导入 genvarloader（可能未安装），首次使用时才检查
+_gvl_module: Optional[object] = None
+
+def _get_gvl():
+    global _gvl_module
+    if _gvl_module is None:
+        try:
+            import genvarloader as _g
+            _gvl_module = _g
+        except ImportError:
+            raise ImportError(
+                "genvarloader is not installed. "
+                "Please install: pip install genvarloader"
+            )
+    return _gvl_module
 
 
 # --------------------------------------------------------------
 # 全局 dataset 缓存（进程内只加载一次）
 # --------------------------------------------------------------
-_dataset_cache: Dict[str, "gvl.RaggedDataset"] = {}
+_dataset_cache: Dict[str, object] = {}
 _region_idx_cache: Dict[str, List[Optional[int]]] = {}  # var_id → region_idx (None = 未命中)
 
 
@@ -123,7 +138,7 @@ class GenVarLoaderSequenceBuilder:
         self.overwrite = overwrite
 
         # 惰性初始化
-        self._dataset: Optional[gvl.RaggedDataset] = None
+        self._dataset: Optional[object] = None
         self._regions: List[Tuple[str, int, int]] = []
         self._var_to_region: Dict[str, int] = {}
 
@@ -149,7 +164,7 @@ class GenVarLoaderSequenceBuilder:
                 regions.append((parts[0], int(parts[1]), int(parts[2])))
         return regions
 
-    def _ensure_dataset(self) -> gvl.RaggedDataset:
+    def _ensure_dataset(self) -> object:
         """惰性创建 / 打开 .gvl 数据集。"""
         if self._dataset is not None:
             return self._dataset
@@ -158,7 +173,7 @@ class GenVarLoaderSequenceBuilder:
 
         if not os.path.exists(gvl_path) or self.overwrite:
             print(f"🔨 GenVarLoader: building dataset at {gvl_path} ...")
-            gvl.write(
+            _get_gvl().write(
                 path=gvl_path,
                 bed=self.bed_path,
                 variants=self.vcf_path,
@@ -169,7 +184,7 @@ class GenVarLoaderSequenceBuilder:
         else:
             print(f"📂 GenVarLoader: loading cached dataset from {gvl_path} ...")
 
-        self._dataset = gvl.Dataset.open(
+        self._dataset = _get_gvl().Dataset.open(
             path=gvl_path,
             reference=self.ref_fasta,
         )
