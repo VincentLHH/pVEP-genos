@@ -12,21 +12,21 @@ tests/test_09_cross_validation.py
 测试策略
 --------
 两种数据模式：
-1. Mock 数据（纯 CPU，任意节点可跑）：自动构造 VCF + BED + FASTA，
+1. Mock 数据（任意节点可跑）：自动构造 VCF + BED + FASTA，
    对齐 builtin 和 gvl 的窗口逻辑，保证两者看到完全相同的输入。
-2. 真实数据（GPU 节点）：使用 env 环境变量 / config 指定的真实文件，
+2. 真实数据（CPU 节点，有 genvarloader）：使用 env 环境变量 / config 指定的真实文件，
    验证端到端一致性。
 
 运行
 ----
-# 任意节点：仅 mock 数据测试
+# CPU 节点（有 genvarloader）：mock + 真实数据测试
 pytest tests/test_09_cross_validation.py -v
 
-# GPU 节点：mock + 真实数据测试
+# GPU 节点（无 genvarloader）：自动 skip 全模块
 pytest tests/test_09_cross_validation.py -v
 
-# 仅真实数据
-pytest tests/test_09_cross_validation.py -v -k "real"
+# 仅 mock 数据（排除真实数据）
+pytest tests/test_09_cross_validation.py -v -k "not real"
 """
 
 import gzip
@@ -209,6 +209,7 @@ def make_mock_data(test_case):
 
 @pytest.fixture(scope="session")
 def gvl_available():
+    """genvarloader 未装时跳过全模块（CPU 节点通常有，GPU 节点通常无）"""
     if not HAS_GVL:
         pytest.skip("genvarloader not installed", allow_module_level=True)
 
@@ -517,7 +518,7 @@ class TestCrossValidationRealData:
 def test_summary_report(gvl_available):
     """打印测试套件汇总（始终运行，用于报告）"""
     print("\n" + "=" * 70)
-    print("Cross-Validation Summary")
+    print("Cross-Validation Summary (run on CPU node with genvarloader)")
     print("=" * 70)
     print(f"  GenVarLoader installed: {HAS_GVL}")
     print(f"  Mock SNP cases: {len(SNP_TEST_CASES)}")
