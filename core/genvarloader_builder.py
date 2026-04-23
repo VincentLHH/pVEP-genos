@@ -283,27 +283,27 @@ class GenVarLoaderSequenceBuilder:
             return None
 
         # ── 2. 获取样本在数据集中的列索引 ──
-        sample_names = list(ds.sample_ids) if hasattr(ds, "sample_ids") else None
+        # 正确 API：ds.samples 返回 list[str]，ds.n_samples 返回样本数量
+        # 参考：https://genvarloader.readthedocs.io/en/latest/api.html
+        try:
+            sample_names = list(ds.samples)
+        except AttributeError:
+            sample_names = None
 
         if sample_names is None:
-            # fallback：genvarloader 版本较旧，用全量样本列表
-            sample_names = []
-            try:
-                sample_names = ds._sample_ids  # type: ignore
-            except AttributeError:
-                pass
-
-        if sample_name not in sample_names:
-            # 如果样本不在 GVL 数据集中（可能是 VCF 里有但写 gvl 时没指定 samples），
-            # 尝试跳过
-            return None
-
-        sample_idx = sample_names.index(sample_name)
+            print("[DEBUG] ds.samples unavailable, assuming single sample at index 0")
+            sample_idx = 0
+        else:
+            if sample_name not in sample_names:
+                print(f"[DEBUG] sample '{sample_name}' not found in dataset. Available: {sample_names}")
+                return None
+            sample_idx = sample_names.index(sample_name)
 
         # ── 3. 重建单倍型序列 ──
         try:
             haps = ds[region_idx, sample_idx]
-        except Exception:
+        except Exception as e:
+            print(f"[DEBUG] ds[{region_idx}, {sample_idx}] raised: {type(e).__name__}: {e}")
             return None
 
         # haps 可能是：
@@ -363,6 +363,7 @@ class GenVarLoaderSequenceBuilder:
         ds = self._ensure_dataset()
         return {
             "n_regions": len(self._regions),
-            "n_samples": len(ds.sample_ids) if hasattr(ds, "sample_ids") else "unknown",
+            "n_samples": len(ds.samples) if hasattr(ds, "samples") else "unknown",
+            "sample_names": list(ds.samples) if hasattr(ds, "samples") else [],
             "gvl_path": self._gvl_path(),
         }
