@@ -133,7 +133,8 @@ class TestBuiltinSequenceBuilder:
     def test_snp_heterozygous_0_1(self, builder, simple_fasta):
         """SNP: (0|1) 方向"""
         seq = "ACGT" * 75
-        v = Variant("chr1", 30, seq[29], "C", (0, 1))
+        # seq[29] = "C". Pick alt != ref, e.g. "G" or "T"
+        v = Variant("chr1", 30, seq[29], "T", (0, 1))
 
         result = builder.build(v, [v])
 
@@ -143,7 +144,7 @@ class TestBuiltinSequenceBuilder:
         # variant always lands at center (index=20) regardless of genomic position
         HALF = 20
         assert hap1[HALF] == seq[29], f"hap1 (allele=0) should carry REF at center: {hap1[HALF]}"
-        assert hap2[HALF] == "C", f"hap2 (allele=1) should carry ALT at center: {hap2[HALF]}"
+        assert hap2[HALF] == "T", f"hap2 (allele=1) should carry ALT at center: {hap2[HALF]}"
         assert_haps_differ(hap1, hap2)
         print(f"✅ SNP (0|1): passed")
 
