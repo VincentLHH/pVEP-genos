@@ -43,6 +43,7 @@ import os
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+import pysam
 
 from core.variant import Variant
 
@@ -153,6 +154,7 @@ class GenVarLoaderSequenceBuilder:
         strandaware: bool = True,
         max_mem: str = "4g",
         overwrite: bool = False,
+        window_size: int = 128,
     ):
         self.vcf_path = vcf_path
         self.bed_path = bed_path
@@ -161,6 +163,9 @@ class GenVarLoaderSequenceBuilder:
         self.strandaware = strandaware
         self.max_mem = max_mem
         self.overwrite = overwrite
+        self.window_size = window_size
+        self._half_window = window_size // 2
+        self._fasta: Optional[pysam.FastaFile] = None
 
         # 惰性初始化
         self._dataset: Optional[object] = None
@@ -240,6 +245,32 @@ class GenVarLoaderSequenceBuilder:
             self._var_to_region[_region_key(chrom, start, end)] = idx
 
         return self._dataset
+
+    def _get_fasta(self) -> pysam.FastaFile:
+        """惰性加载参考基因组 FASTA。"""
+        if self._fasta is None:
+            self._fasta = pysam.FastaFile(self.ref_fasta)
+        return self._fasta
+
+    def _fetch_ref_window(self, variant: Variant) -> Optional[str]:
+        """
+        从参考基因组获取以 variant 为中心的窗口序列。
+        与内置 SequenceBuilder._get_ref_window() 逻辑完全一致：
+        left = pos - half_window, right = pos + len(ref) - 1 + half_window
+        """
+        pos = variant.pos
+        left = pos - self._half_window
+        right = pos + len(variant.ref) - 1 + self._half_window
+
+        if left < 1:
+            return None
+
+        try:
+            fasta = self._get_fasta()
+            seq = fasta.fetch(variant.chrom, left - 1, right).upper()
+            return seq
+        except Exception:
+            return None
 
     # =========================================================
     # 核心接口：与 SequenceBuilder.build() 对齐
@@ -353,11 +384,14 @@ class GenVarLoaderSequenceBuilder:
         if not hap1_seq or not hap2_seq:
             return None
 
-        # 参考序列从 hap1_seq（因为 hap1_seq 就是参考序列 + 变异的重建结果，
-        # 对于 alt allele=0 的位置它等于参考）
-        ref_seq = hap1_seq  # 近似参考（实际等于 haplotype 1 的完整序列）
-        # 更准确的参考序列获取方式：用 --ref-from-fa 参数写 gvl，或直接从 FASTA 读
-        # 这里用 hap1_seq 作为 proxy（与内置 builder 语义一致）
+        # ref_seq 必须直接从 FASTA 获取原始参考序列，与内置 builder 完全一致。
+        # 注意：hap1_seq/hap2_seq 是 genvarloader 重建的单倍型，
+        # 其中可能包含 variant，不应作为 ref_seq。
+        # 对于 homo ALT 的样本，两个 hap 都是 ALT，没有 REF allele，
+        # 必须从 FASTA 获取纯参考序列。
+        ref_seq = self._fetch_ref_window(center_variant)
+        if ref_seq is None:
+            return None
 
         return {
             "ref_seq": ref_seq,
