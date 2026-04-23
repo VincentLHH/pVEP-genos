@@ -234,8 +234,8 @@ class TestAPIEmbed:
         # 清空 cache
         httpx.delete(f"{api_base_url}/cache", timeout=10).raise_for_status()
 
-        # 推理 5 条新序列
-        seqs = {f"s{i}": f"{'ACGT'[i%4]}" * 64 for i in range(5)}
+        # 推理 5 条新序列（确保互不相同，避免被服务端 dedup 去重）
+        seqs = {f"s{i}": f"ACGT" * 16 + chr(65 + i) * 1 for i in range(5)}
         payload = {"seq_dict": seqs, "methods": ["mean"]}
         resp = httpx.post(f"{api_base_url}/embed", json=payload, timeout=60)
         resp.raise_for_status()
