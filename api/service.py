@@ -185,16 +185,18 @@ def run_server(
     batch_size: int = 32,
     host: str = "0.0.0.0",
     port: int = 8000,
-    workers: int = 1,
 ):
     """
     启动 API 服务（非 async，供 CLI 调用）。
+
+    注意：固定单 worker（workers=1），因为 _manager 加载在主进程，
+    若用 workers>1 会导致 worker 进程重新导入模块时 _manager=None。
     """
     global _manager, _args_holder
 
     print(f"[API Service] 🔄 Loading model [{model_name}] on {device}...")
 
-    # 加载模型（同步）
+    # 加载模型（同步，在主进程）
     _manager = EmbeddingManager(
         model_name=model_name,
         model_path=model_path,
@@ -206,12 +208,11 @@ def run_server(
 
     _args_holder.update({"host": host, "port": port})
 
-    # uvicorn 直接同步启动（blocking）
+    # 直接传 app 对象（不传字符串），避免 uvicorn 重新导入模块导致 _manager 丢失
     uvicorn.run(
-        "api.service:app",
+        app,
         host=host,
         port=port,
-        workers=workers,
         log_level="info",
     )
 
@@ -225,7 +226,6 @@ def main():
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--workers", type=int, default=1)
 
     global args
     args = parser.parse_args()
@@ -238,7 +238,6 @@ def main():
         batch_size=args.batch_size,
         host=args.host,
         port=args.port,
-        workers=args.workers,
     )
 
 
