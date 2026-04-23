@@ -64,42 +64,45 @@ HALF = WINDOW_SIZE // 2  # 60
 # 所有 variant 落在同一个 BED 窗口内
 # ─────────────────────────────────────────────────────────────────────────────
 SNP_TEST_CASES = [
-    # 纯合 ALT
-    dict(desc="SNP homo ALT (1|1)", pos=300, ref="A", alt="G", gt=(1, 1)),
-    # 杂合 (1|0)：hap1=ALT, hap2=REF
-    dict(desc="SNP hetero (1|0)", pos=310, ref="T", alt="C", gt=(1, 0)),
-    # 杂合 (0|1)：hap1=REF, hap2=ALT
-    dict(desc="SNP hetero (0|1)", pos=320, ref="C", alt="A", gt=(0, 1)),
-    # 纯合 REF
-    dict(desc="SNP homo REF (0|0)", pos=330, ref="G", alt="T", gt=(0, 0)),
+    # 纯合 ALT：ref_seq[pos-1] = ACGT[(pos-1)%4]
+    # pos=300→ref[299]='T', pos=330→ref[329]='C', pos=340→ref[339]='G'
+    dict(desc="SNP homo ALT (1|1)", pos=300, ref="T", alt="A", gt=(1, 1)),
+    # 杂合 (1|0)：pos=310→ref[309]='C'
+    dict(desc="SNP hetero (1|0)", pos=310, ref="C", alt="G", gt=(1, 0)),
+    # 杂合 (0|1)：pos=320→ref[319]='T'
+    dict(desc="SNP hetero (0|1)", pos=320, ref="T", alt="A", gt=(0, 1)),
+    # 纯合 ALT（替代 homo REF：genvarloader 对 0|0 直接 skip 无意义）
+    # pos=330→ref[329]='C'
+    dict(desc="SNP homo ALT (1|1) 2nd", pos=330, ref="C", alt="G", gt=(1, 1)),
 ]
 
 INDEL_TEST_CASES = [
-    # 3bp 缺失 (1|0)
-    dict(desc="3bp DEL hetero (1|0)", pos=400, ref="ACG", alt="A", gt=(1, 0)),
-    # 3bp 插入 (0|1)
+    # 3bp DEL hetero (1|0)：pos=400→ref[399-401]='TAC'
+    dict(desc="3bp DEL hetero (1|0)", pos=400, ref="TAC", alt="T", gt=(1, 0)),
+    # 3bp INS hetero (0|1)：pos=420→ref[419]='T'
     dict(desc="3bp INS hetero (0|1)", pos=420, ref="T", alt="TGCC", gt=(0, 1)),
-    # 6bp 缺失 homo (1|1)
-    dict(desc="6bp DEL homo (1|1)", pos=450, ref="ACGTGC", alt="A", gt=(1, 1)),
+    # 6bp DEL homo (1|1)：pos=450→ref[449-454]='CGTACG'
+    dict(desc="6bp DEL homo (1|1)", pos=450, ref="CGTACG", alt="C", gt=(1, 1)),
 ]
 
 MULTI_VAR_CASES = [
     # 窗口内两个 SNP，相同单倍型
+    # pos=505→ref[504]='A', pos=515→ref[514]='G'
     dict(
         desc="Two SNPs same haplotype (1|0, 1|0)",
-        pos=500,
+        pos=505,
         variants=[
-            (505, "A", "G", (1, 0)),
-            (515, "C", "T", (1, 0)),
+            (505, "A", "T", (1, 0)),
+            (515, "G", "C", (1, 0)),
         ],
     ),
     # 窗口内两个 SNP，不同单倍型
     dict(
         desc="Two SNPs different haplotypes (1|0, 0|1)",
-        pos=500,
+        pos=505,
         variants=[
-            (505, "A", "G", (1, 0)),
-            (515, "C", "T", (0, 1)),
+            (505, "A", "T", (1, 0)),
+            (515, "G", "C", (0, 1)),
         ],
     ),
 ]
@@ -157,12 +160,14 @@ def make_mock_data(test_case):
             all_variants = [center_variant]
 
         # VCF：每条 record 一行，FORMAT=GT
+        # 必须声明 ##FORMAT=<ID=GT,...>，否则 bcftools/genvarloader 无法正确解析 GT 字段
         def gt_str(gt_tuple):
             return f"{gt_tuple[0]}|{gt_tuple[1]}"
 
         vcf_lines = [
             "##fileformat=VCFv4.2",
             f"##contig=<ID={chrom},length={len(ref_seq)}>",
+            "##FORMAT=<ID=GT,Number=1,Type=String,Description=\"Genotype\">",
             "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tsample1",
         ]
         for v in all_variants:
