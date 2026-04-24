@@ -9,28 +9,44 @@ pytest 全局 fixtures 和环境检测工具。
 - GPU/CUDA/GenVarLoader 检测集中在一处，避免各测试文件重复。
 - 提供真实数据和 mock 数据两套 fixture，测试覆盖更全面。
 - Skip helpers 统一导出，各测试文件统一 import 使用。
+- CPU 环境没有 genos model，相关测试会自动 skip。
+
+重要约束
+--------
+**CPU 环境**：通常没有 genos model 文件，因此需要模型的测试会自动 skip。
+- HAS_CUDA=False → 大部分 GPU 测试会 skip
+- HAS_MODEL=False → 需要模型推理的测试会 skip
+
+**GPU 环境**：有 CUDA 但可能没有 genvarloader 库。
+- GenVarLoader 相关测试需要单独检测
 
 使用方式
 --------
 在测试文件中：
 
     from tests.conftest import (
-        skip_if_no_cuda,
-        skip_if_single_gpu,
-        skip_if_no_gvl,
-        require_gpu,
-        require_genvarloader,
-        HAS_CUDA,
-        GPU_COUNT,
-        HAS_GVL,
+        HAS_CUDA, HAS_MODEL, GPU_COUNT, HAS_GVL,
+        skip_if_no_cuda, skip_if_no_model, skip_if_no_cuda_or_model,
+        skip_if_single_gpu, skip_if_no_gvl,
+        require_gpu_model, require_model_path, require_real_data,
     )
 
-    @skip_if_no_cuda
+    # 需要 GPU + 模型
+    @pytest.mark.gpu
+    @skip_if_no_cuda_or_model
     def test_gpu_feature():
         ...
 
+    # 需要多卡
+    @pytest.mark.multi_gpu
     @skip_if_single_gpu
     def test_multi_gpu():
+        ...
+
+    # 需要 genvarloader
+    @pytest.mark.genvarloader
+    @skip_if_no_gvl
+    def test_genvarloader_feature():
         ...
 """
 
@@ -78,6 +94,28 @@ def _has_genvarloader():
         return False
 
 
+def _has_model_path():
+    """
+    检测 genos model 路径是否存在。
+
+    注意：CPU 环境通常没有 genos model 文件，
+    因此这个检测与 CUDA 检测配合使用。
+    """
+    path = os.environ.get("PVEPGENOS_MODEL_PATH")
+    if path and os.path.exists(path):
+        return path
+    # fallback to config
+    cfg_file = PROJECT_ROOT / "config" / "default.yaml"
+    if cfg_file.exists():
+        import yaml
+        with open(cfg_file) as f:
+            cfg = yaml.safe_load(f)
+        p = cfg.get("model", {}).get("path", "")
+        if p and os.path.exists(p):
+            return p
+    return None
+
+
 def _gpu_memory_gb():
     """返回当前可见 GPU 的总显存（GB），估算不可用时返回 0"""
     try:
@@ -98,11 +136,17 @@ HAS_CUDA: bool = _has_torch_cuda()
 GPU_COUNT: int = _gpu_count()
 HAS_GVL: bool = _has_genvarloader()
 GPU_MEM_GB: float = _gpu_memory_gb()
+MODEL_PATH: str | None = _has_model_path()  # 模型路径（可能为 None）
+HAS_MODEL: bool = MODEL_PATH is not None   # 模型是否存在
+
+# CPU 环境没有 genos model：HAS_CUDA=False → HAS_MODEL 通常也为 False
+# 但设计上保持独立，这样可以在有模型但无 CUDA 时正确 skip
 
 # 打印环境信息（session 初始化时）
 print(f"[conftest] Environment: "
       f"CUDA={HAS_CUDA}, GPUs={GPU_COUNT}, "
-      f"GenVarLoader={HAS_GVL}, VRAM={GPU_MEM_GB:.1f} GB")
+      f"GenVarLoader={HAS_GVL}, Model={HAS_MODEL}, "
+      f"VRAM={GPU_MEM_GB:.1f} GB")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -134,8 +178,13 @@ skip_if_single_gpu = pytest.mark.skipif(
 )
 
 skip_if_no_model = pytest.mark.skipif(
-    True,  # will be overridden per-test with env_model_path fixture
-    reason="Model path not configured"
+    not HAS_MODEL,
+    reason=f"Genos model not found (PVEPGENOS_MODEL_PATH not set or path does not exist)"
+)
+
+skip_if_no_cuda_or_model = pytest.mark.skipif(
+    not (HAS_CUDA and HAS_MODEL),
+    reason=f"Need CUDA ({HAS_CUDA}) AND model ({HAS_MODEL}) for GPU inference"
 )
 
 # GenVarLoader 相关
@@ -367,12 +416,34 @@ def check_result_nontrivial(result: dict, min_dim: int = 128):
 
 @pytest.fixture(scope="session")
 def require_model_path(env_model_path):
-    """模型路径不可用时 skip 测试"""
+    """
+    模型路径不可用时 skip 测试。
+
+    注意：这个 fixture 只检测模型路径是否存在，不检测 CUDA。
+    如果需要 GPU + 模型，请使用 require_gpu_model fixture。
+    """
     if not env_model_path:
         pytest.skip("Model path not configured (set PVEPGENOS_MODEL_PATH)", allow_module_level=True)
     if not os.path.exists(str(env_model_path)):
         pytest.skip(f"Model path not found: {env_model_path}", allow_module_level=True)
     return env_model_path
+
+
+@pytest.fixture(scope="session")
+def require_gpu_model():
+    """
+    需要 GPU + 模型时 skip 测试。
+    相当于 skip_if_no_cuda_or_model 的 fixture 版本。
+
+    使用场景：
+    - 需要加载模型并进行 GPU 推理的测试
+    - CPU 环境没有 genos model，会被 skip
+    """
+    if not HAS_CUDA:
+        pytest.skip(f"CUDA not available (found {GPU_COUNT} GPU(s))", allow_module_level=True)
+    if not HAS_MODEL:
+        pytest.skip(f"Genos model not found (PVEPGENOS_MODEL_PATH not set or path does not exist)", allow_module_level=True)
+    return MODEL_PATH
 
 
 @pytest.fixture(scope="session")

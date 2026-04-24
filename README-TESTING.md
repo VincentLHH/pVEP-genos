@@ -9,14 +9,23 @@
 | 文件 | 测试内容 | 运行环境 | 依赖 | 标记 |
 |------|----------|----------|------|------|
 | `test_01_sequence_builder.py` | builtin 序列构建器 | 任意节点（纯CPU） | mock_fasta | `cpu` |
-| `test_02_genvarloader_builder.py` | GenVarLoader 序列构建器 | GPU节点 | genvarloader + 真实数据 | `genvarloader`, `real` |
+| `test_02_genvarloader_builder.py` | GenVarLoader 序列构建器 | CPU节点（需genvarloader） | genvarloader + 真实数据 | `genvarloader`, `real` |
 | `test_03_embedding_manager.py` | 本地 GPU 推理 | GPU节点 | CUDA + 模型权重 | `gpu`, `cpu` |
 | `test_04_api_service.py` | API 服务（standalone） | GPU节点 | CUDA + 模型权重（服务进程） | `api`, `gpu` |
 | `test_05_api_client.py` | API 客户端 | 任意节点 | httpx（调用远程API） | `api` |
 | `test_06_multi_gpu.py` | 多卡推理 | ≥2 GPU节点 | ≥2 CUDA | `gpu`, `multi_gpu`, `genvarloader`, `real` |
 | `test_07_sample_checkpoint.py` | 断点续存 | 任意节点 | mock_fasta | `cpu` |
 | `test_08_cli_flags.py` | CLI 参数解析 | 任意节点 | pytest | `cpu` |
+| `test_09_cross_validation.py` | builtin vs genvarloader 交叉验证 | CPU节点（需genvarloader） | genvarloader | `genvarloader`, `real` |
 | `conftest.py` | pytest fixtures、mock数据、环境检测 | — | — | — |
+
+### 运行环境说明
+
+| 环境 | CUDA | 模型文件 | genvarloader | 适用测试 |
+|------|------|----------|--------------|----------|
+| GPU 节点 | ✅ | ✅ | 可能无 | test_03, test_04, test_06 |
+| CPU 节点（无genvarloader） | ❌ | ❌ | ❌ | test_01, test_07, test_08 |
+| CPU 节点（有genvarloader） | ❌ | ❌ | ✅ | test_02, test_09 |
 
 ---
 
@@ -28,11 +37,32 @@
 |------|------|----------------|
 | `gpu` | 需要 CUDA GPU | 无 GPU 时自动跳过 |
 | `cpu` | 纯 CPU 测试 | 无条件运行 |
+| `model` | 需要 genos model 文件 | 模型路径不存在时跳过 |
 | `genvarloader` | 需要 genvarloader 库 | 库不可用时自动跳过 |
 | `multi_gpu` | 需要 ≥2 GPU | 单 GPU 时自动跳过 |
 | `api` | 需要 API 服务运行 | 服务不可达时自动跳过 |
 | `real` | 需要真实数据文件 | 数据路径未配置时跳过 |
 | `slow` | 慢速测试（完整 pipeline） | 可通过 `-m "not slow"` 跳过 |
+
+### 环境检测常量（conftest.py）
+
+```python
+HAS_CUDA       # CUDA 是否可用
+HAS_MODEL      # genos model 路径是否存在
+GPU_COUNT      # GPU 数量
+HAS_GVL        # genvarloader 库是否可导入
+GPU_MEM_GB     # 总显存（GB）
+```
+
+### Skip 装饰器
+
+```python
+skip_if_no_cuda          # 无 CUDA 时 skip
+skip_if_no_model         # 无模型文件时 skip
+skip_if_no_cuda_or_model # 无 CUDA 或无模型时 skip
+skip_if_single_gpu       # 单 GPU 时 skip
+skip_if_no_gvl           # 无 genvarloader 时 skip
+```
 
 ---
 
@@ -50,7 +80,7 @@ pytest tests/ -v -m "cpu"
 # 仅运行 GPU 测试
 pytest tests/ -v -m "gpu"
 
-# 仅运行 genvarloader 相关测试
+# 仅运行 genvarloader 相关测试（CPU 节点）
 pytest tests/ -v -m "genvarloader"
 
 # 仅运行多卡测试
@@ -58,6 +88,9 @@ pytest tests/ -v -m "multi_gpu"
 
 # 仅运行 API 相关测试
 pytest tests/ -v -m "api"
+
+# 仅运行交叉验证测试（CPU 节点，需 genvarloader）
+pytest tests/test_09_cross_validation.py -v
 
 # 跳过慢速测试
 pytest tests/ -v -m "not slow"
@@ -67,6 +100,9 @@ pytest tests/ -v -m "gpu and not multi_gpu"
 
 # 跳过需要 genvarloader 的测试
 pytest tests/ -v -m "not genvarloader"
+
+# 查看哪些测试会被 skip
+pytest tests/ --collect-only -q
 ```
 
 ---
@@ -101,7 +137,7 @@ export PVEPGENOS_REF_FASTA=/path/to/hg38.fa
 # 1. 序列构建器（纯CPU，无需GPU）
 pytest tests/test_01_sequence_builder.py -v
 
-# 2. GenVarLoader（需要 genvarloader 库）
+# 2. GenVarLoader（需要 genvarloader 库，GPU 节点通常没有）
 pytest tests/test_02_genvarloader_builder.py -v
 
 # 3. EmbeddingManager 本地推理
@@ -171,6 +207,16 @@ pytest tests/test_07_sample_checkpoint.py -v
 pytest tests/test_08_cli_flags.py -v
 ```
 
+### Step 3: Cross-Validation 测试（需要 genvarloader）
+
+```bash
+# 安装 genvarloader 后可运行
+pytest tests/test_09_cross_validation.py -v
+
+# 仅运行 mock 数据测试（不需要真实数据文件）
+pytest tests/test_09_cross_validation.py -v -k "not real"
+```
+
 ---
 
 ## 环境变量说明
@@ -198,10 +244,15 @@ pytest tests/ -v -m "genvarloader" --collect-only
 pytest tests/ -v -m "not genvarloader"
 ```
 
-### Q: test_03 报 "CUDA not available"
-**A**: 当前节点没有 GPU。可以：
+### Q: test_03 报 "CUDA not available" 或 "model not found"
+**A**: 当前节点没有 GPU 或 genos model。可以：
 1. 使用 API 模式测试（test_05）代替
-2. 运行 CPU 版本测试：`pytest tests/test_03_embedding_manager.py -v -k "cpu"`
+2. 在有 GPU 的节点运行 test_03
+
+### Q: CPU 环境运行测试时报 "model not found"
+**A**: 这是正常行为。CPU 环境没有 genos model 文件，需要 GPU 节点的测试会自动 skip。
+- 运行纯 CPU 测试：`pytest tests/ -v -m "cpu"`
+- 运行 genvarloader 测试：`pytest tests/ -v -m "genvarloader"`
 
 ### Q: test_04 API 服务启动失败
 **A**: 确认模型路径正确，CUDA 可用：
@@ -251,9 +302,10 @@ python tests/test_01_sequence_builder.py -v
 
 ```python
 # conftest.py 导出：
-HAS_CUDA, GPU_COUNT, HAS_GVL  # 全局常量
-skip_if_no_cuda, skip_if_no_gvl, skip_if_single_gpu  # skip helpers
-require_model_path, require_real_data, require_api_service  # fixtures
+HAS_CUDA, HAS_MODEL, GPU_COUNT, HAS_GVL  # 全局常量
+skip_if_no_cuda, skip_if_no_model, skip_if_no_cuda_or_model  # skip helpers
+skip_if_single_gpu, skip_if_no_gvl  # skip helpers
+require_gpu_model, require_model_path, require_real_data  # fixtures
 ```
 
 各测试文件统一导入使用，避免重复检测：
@@ -261,11 +313,12 @@ require_model_path, require_real_data, require_api_service  # fixtures
 ```python
 # 测试文件中：
 from tests.conftest import (
-    HAS_CUDA, skip_if_no_cuda, skip_if_no_gvl, ...
+    HAS_CUDA, HAS_MODEL, skip_if_no_cuda, skip_if_no_cuda_or_model, ...
 )
 
+# 需要 GPU + 模型
 @pytest.mark.gpu
-@skip_if_no_cuda
+@skip_if_no_cuda_or_model
 def test_gpu_feature():
     ...
 ```
@@ -291,7 +344,14 @@ def test_that_needs_gpu_and_real_data():
 1. 命名遵循 `test_XX_description.py` 格式（XX = 序号）
 2. 使用 `conftest.py` 提供的 fixtures 和 skip helpers
 3. GPU 相关测试加 `@pytest.mark.gpu` + `@skip_if_no_cuda`
-4. GenVarLoader 相关测试加 `@pytest.mark.genvarloader` + `@skip_if_no_gvl`
-5. 多卡测试加 `@pytest.mark.multi_gpu` + `@skip_if_single_gpu`
-6. 提供 `if __name__ == "__main__"` 直接运行入口
-7. 在本 README 更新测试矩阵表
+4. 需要模型推理的测试加 `@pytest.mark.gpu` + `@skip_if_no_cuda_or_model`
+5. GenVarLoader 相关测试加 `@pytest.mark.genvarloader` + `@skip_if_no_gvl`
+6. 多卡测试加 `@pytest.mark.multi_gpu` + `@skip_if_single_gpu`
+7. 提供 `if __name__ == "__main__"` 直接运行入口
+8. 在本 README 更新测试矩阵表
+
+### 重要约束
+
+**CPU 环境没有 genos model**。如果测试需要模型文件，请使用：
+- `skip_if_no_cuda_or_model` - 同时检测 CUDA 和模型
+- `require_gpu_model` fixture - 需要 GPU + 模型的场景
