@@ -25,6 +25,10 @@ export PVEPGENOS_VCF_PATH=/path/to/your.vcf.gz
 export PVEPGENOS_BED_PATH=/path/to/your.bed
 export PVEPGENOS_REF_FASTA=/path/to/hg38.fa
 pytest tests/test_06_multi_gpu.py -v -s
+
+标记过滤：
+pytest tests/ -v -m "multi_gpu"           # 仅运行多卡测试
+pytest tests/ -v -m "not multi_gpu"      # 跳过多卡测试
 """
 
 
@@ -40,6 +44,7 @@ def _mp_reader(shared_dict, key):
     """子进程读取 shared dict"""
     return shared_dict.get(key)
 
+
 import os
 import sys
 import tempfile
@@ -51,49 +56,22 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 # ─────────────────────────────────────────────────────────────
-# 环境检测
+# 使用 conftest.py 统一的环境检测和 skip helpers
 # ─────────────────────────────────────────────────────────────
-try:
-    import torch
-    HAS_CUDA = torch.cuda.is_available()
-    GPU_COUNT = torch.cuda.device_count() if HAS_CUDA else 0
-except Exception:
-    HAS_CUDA = False
-    GPU_COUNT = 0
-
-skip_if_no_cuda = pytest.mark.skipif(
-    not HAS_CUDA,
-    reason="CUDA not available"
-)
-skip_if_single_gpu = pytest.mark.skipif(
-    GPU_COUNT < 2,
-    reason=f"Need ≥2 GPUs, found {GPU_COUNT}"
+from tests.conftest import (
+    HAS_CUDA,
+    GPU_COUNT,
+    skip_if_no_cuda,
+    skip_if_single_gpu,
+    skip_if_no_gvl,
+    HAS_GVL,
+    require_real_data,
+    require_model_path,
 )
 
-
 # ─────────────────────────────────────────────────────────────
-# Fixtures
+# Fixtures（复用 conftest 的通用 fixtures）
 # ─────────────────────────────────────────────────────────────
-
-@pytest.fixture(scope="session")
-def real_data_cfg(env_vcf_path, env_bed_path, env_ref_fasta, env_model_path):
-    """收集所有真实数据路径，缺失则 skip"""
-    missing = []
-    vals = {
-        "vcf_path": env_vcf_path,
-        "bed_path": env_bed_path,
-        "ref_fasta": env_ref_fasta,
-        "model_path": env_model_path,
-    }
-    for name, val in vals.items():
-        if not val or not os.path.exists(str(val)):
-            missing.append(f"{name}={val!r}")
-
-    if missing:
-        pytest.skip(f"Missing data: {missing}", allow_module_level=True)
-
-    return vals
-
 
 @pytest.fixture(scope="session")
 def temp_output_dir():
@@ -106,16 +84,24 @@ def temp_output_dir():
 # ─────────────────────────────────────────────────────────────
 
 class TestGPUCountDetection:
-    """GPU 数量检测"""
+    """GPU 数量检测（gpu + multi_gpu 标记）"""
 
+    @pytest.mark.gpu
+    @skip_if_no_cuda
     def test_cuda_available(self):
+        """CUDA 可用"""
         assert HAS_CUDA, "CUDA should be available"
 
+    @pytest.mark.gpu
+    @pytest.mark.multi_gpu
     @skip_if_single_gpu
     def test_multiple_gpus_detected(self):
+        """至少检测到 2 个 GPU"""
         assert GPU_COUNT >= 2, f"Expected ≥2 GPUs, found {GPU_COUNT}"
         print(f"Detected {GPU_COUNT} GPUs")
 
+    @pytest.mark.gpu
+    @pytest.mark.multi_gpu
     @skip_if_single_gpu
     def test_all_devices_accessible(self):
         """验证所有 GPU 设备均可访问"""
@@ -128,7 +114,7 @@ class TestGPUCountDetection:
 
 
 class TestMultiGPUImport:
-    """多卡模块可导入"""
+    """多卡模块可导入（无 GPU 要求）"""
 
     def test_multi_gpu_runner_importable(self):
         """core.multi_gpu_runner 应可正常导入"""
@@ -143,7 +129,7 @@ class TestMultiGPUImport:
 
 
 class TestRoundRobinDistribution:
-    """Round-robin 分配逻辑"""
+    """Round-robin 分配逻辑（无 GPU 要求）"""
 
     def test_even_distribution(self):
         """样本均匀分配到各 GPU"""
@@ -184,8 +170,9 @@ class TestRoundRobinDistribution:
 
 
 class TestSharedCacheMechanism:
-    """跨进程共享 cache"""
+    """跨进程共享 cache（multi_gpu 标记）"""
 
+    @pytest.mark.multi_gpu
     @skip_if_single_gpu
     def test_manager_dict_works(self):
         """Manager().dict() 跨进程共享"""
@@ -208,22 +195,25 @@ class TestSharedCacheMechanism:
 
 
 class TestMultiGPUMinimal:
-    """最小化多卡运行测试（用真实数据，少量样本）"""
+    """最小化多卡运行测试（multi_gpu + real 标记）"""
 
+    @pytest.mark.multi_gpu
+    @pytest.mark.real
+    @pytest.mark.gpu
     @skip_if_single_gpu
-    def test_multi_gpu_two_samples_two_gpus(self, real_data_cfg, temp_output_dir):
+    def test_multi_gpu_two_samples_two_gpus(self, require_real_data, require_model_path, temp_output_dir):
         """真实运行：2 样本 + 2 GPU，验证不出错"""
         import run_pipeline
         import yaml
 
         # 创建临时 config
         tmp_cfg = {
-            "vcf_path": real_data_cfg["vcf_path"],
-            "bed_path": real_data_cfg["bed_path"],
-            "ref_fasta": real_data_cfg["ref_fasta"],
+            "vcf_path": require_real_data["vcf_path"],
+            "bed_path": require_real_data["bed_path"],
+            "ref_fasta": require_real_data["ref_fasta"],
             "model": {
                 "name": "Genos-1.2B",
-                "path": real_data_cfg["model_path"],
+                "path": require_model_path,
                 "dtype": "bfloat16",
                 "batch_size": 8,
                 "mode": "local",
@@ -243,7 +233,7 @@ class TestMultiGPUMinimal:
 
         # 取前 2 个样本测试
         import pysam
-        vcf = pysam.VariantFile(real_data_cfg["vcf_path"])
+        vcf = pysam.VariantFile(require_real_data["vcf_path"])
         all_samples = list(vcf.header.samples)
         vcf.close()
         test_samples = all_samples[:2]
@@ -280,24 +270,18 @@ class TestMultiGPUMinimal:
 
 
 class TestMultiGPUGenVarLoader:
-    """多卡 + GenVarLoader 组合"""
+    """多卡 + GenVarLoader 组合（multi_gpu + genvarloader 标记）"""
 
+    @pytest.mark.multi_gpu
+    @pytest.mark.genvarloader
+    @pytest.mark.real
     @skip_if_single_gpu
-    @pytest.mark.skipif(
-        True,  # genvarloader 需要单独检测
-        reason="genvarloader optional, skip unless explicitly enabled"
-    )
-    def test_multi_gpu_genvarloader_basic(self, real_data_cfg, temp_output_dir):
+    @skip_if_no_gvl
+    def test_multi_gpu_genvarloader_basic(self, require_real_data, require_model_path, temp_output_dir):
         """多卡使用 genvarloader builder"""
-        # 如果 genvarloader 不可用则 skip
-        try:
-            import genvarloader
-        except ImportError:
-            pytest.skip("genvarloader not installed", allow_module_level=True)
-
         import pysam
 
-        vcf = pysam.VariantFile(real_data_cfg["vcf_path"])
+        vcf = pysam.VariantFile(require_real_data["vcf_path"])
         all_samples = list(vcf.header.samples)
         vcf.close()
         test_samples = all_samples[:2]
@@ -307,7 +291,7 @@ class TestMultiGPUGenVarLoader:
         devices = [f"cuda:{i}" for i in range(min(2, GPU_COUNT))]
         tmp_cfg_model = {
             "name": "Genos-1.2B",
-            "path": real_data_cfg["model_path"],
+            "path": require_model_path,
             "dtype": "bfloat16",
             "batch_size": 8,
             "mode": "local",
@@ -317,9 +301,9 @@ class TestMultiGPUGenVarLoader:
             sample_names=test_samples,
             devices=devices,
             model_cfg=tmp_cfg_model,
-            vcf_path=real_data_cfg["vcf_path"],
-            bed_path=real_data_cfg["bed_path"],
-            ref_fasta=real_data_cfg["ref_fasta"],
+            vcf_path=require_real_data["vcf_path"],
+            bed_path=require_real_data["bed_path"],
+            ref_fasta=require_real_data["ref_fasta"],
             window_size=128,
             output_dir=temp_output_dir,
             seq_builder_type="genvarloader",

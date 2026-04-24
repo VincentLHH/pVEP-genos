@@ -25,6 +25,10 @@ pytest tests/test_02_genvarloader_builder.py -v
 
 或跳过真实数据测试（仅做可用性检测）：
 pytest tests/test_02_genvarloader_builder.py -v -k "not real"
+
+标记过滤（可选择性跳过）：
+pytest tests/ -v -m "genvarloader"     # 仅运行 genvarloader 测试
+pytest tests/ -v -m "not genvarloader"  # 跳过 genvarloader 测试
 """
 
 import os
@@ -33,21 +37,23 @@ from pathlib import Path
 
 import pytest
 
-# GenVarLoader 可能未安装，延迟 import
-try:
-    import genvarloader
-    HAS_GVL = True
-except ImportError:
-    HAS_GVL = False
-    genvarloader = None  # type: ignore
-
-skip_if_no_gvl = pytest.mark.skipif(
-    not HAS_GVL,
-    reason="genvarloader not installed or not importable"
-)
-
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
+
+# ─────────────────────────────────────────────────────────────
+# 使用 conftest.py 统一的环境检测和 skip helpers
+# ─────────────────────────────────────────────────────────────
+from tests.conftest import (
+    HAS_GVL,
+    skip_if_no_gvl,
+    require_real_data,
+)
+
+# 延迟导入 genvarloader（仅在需要时）
+if HAS_GVL:
+    import genvarloader
+else:
+    genvarloader = None  # type: ignore
 
 from core.genvarloader_builder import (
     GenVarLoaderSequenceBuilder,
@@ -58,33 +64,14 @@ from core.variant import Variant
 
 
 # ─────────────────────────────────────────────────────────────
-# Fixtures
+# Fixtures（复用 conftest 的通用 fixtures）
 # ─────────────────────────────────────────────────────────────
 
 @pytest.fixture(scope="session")
 def gvl_skip():
+    """兼容旧接口：如果 genvarloader 不可用则 skip"""
     if not HAS_GVL:
         pytest.skip("genvarloader not available", allow_module_level=True)
-
-
-@pytest.fixture(scope="session")
-def real_gvl_cfg(env_vcf_path, env_bed_path, env_ref_fasta):
-    """从环境变量 / config 读取真实数据路径，用于端到端测试"""
-    missing = []
-    for name, val in [("PVEPGENOS_VCF_PATH", env_vcf_path),
-                      ("PVEPGENOS_BED_PATH", env_bed_path),
-                      ("PVEPGENOS_REF_FASTA", env_ref_fasta)]:
-        if not val:
-            missing.append(name)
-
-    if missing:
-        pytest.skip(f"Missing env vars: {missing}", allow_module_level=True)
-
-    for p in (env_vcf_path, env_bed_path, env_ref_fasta):
-        if not os.path.exists(str(p)):
-            pytest.skip(f"Path not found: {p}", allow_module_level=True)
-
-    return dict(vcf_path=env_vcf_path, bed_path=env_bed_path, ref_fasta=env_ref_fasta)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -92,16 +79,18 @@ def real_gvl_cfg(env_vcf_path, env_bed_path, env_ref_fasta):
 # ─────────────────────────────────────────────────────────────
 
 class TestGenVarLoaderImport:
-    """库可用性检测"""
+    """库可用性检测（genvarloader 标记）"""
 
-    def test_genvarloader_importable(self, gvl_skip):
+    @pytest.mark.genvarloader
+    @skip_if_no_gvl
+    def test_genvarloader_importable(self):
         """genvarloader 库可以 import"""
         assert hasattr(genvarloader, "Dataset") or hasattr(genvarloader, "write")
         print(f"genvarloader version: {getattr(genvarloader, '__version__', 'unknown')}")
 
 
 class TestNumpyBytesConversion:
-    """字节转字符串 工具函数测试"""
+    """字节转字符串 工具函数测试（纯 CPU，无需 GPU）"""
 
     def test_numpy_bytes_scalar(self):
         import numpy as np
@@ -123,7 +112,7 @@ class TestNumpyBytesConversion:
 
 
 class TestReverseComplement:
-    """反向互补工具函数"""
+    """反向互补工具函数（纯 CPU，无需 GPU）"""
 
     def test_revcomp_known_sequence(self):
         assert _reverse_complement("AAAA") == "TTTT"
@@ -137,22 +126,25 @@ class TestReverseComplement:
 
 
 class TestGenVarLoaderSequenceBuilder:
-    """核心功能测试（需要真实数据）"""
+    """核心功能测试（需要真实数据 + genvarloader 标记）"""
 
-    def test_gvl_path_deterministic(self, gvl_skip, real_gvl_cfg, tmp_path_factory):
+    @pytest.mark.genvarloader
+    @pytest.mark.real
+    @skip_if_no_gvl
+    def test_gvl_path_deterministic(self, require_real_data, tmp_path_factory):
         """同一 vcf+bed 应生成相同的 .gvl 路径（哈希确定性）"""
         cache_dir = str(tmp_path_factory.mktemp("gvl_cache"))
 
         b1 = GenVarLoaderSequenceBuilder(
-            vcf_path=real_gvl_cfg["vcf_path"],
-            bed_path=real_gvl_cfg["bed_path"],
-            ref_fasta=real_gvl_cfg["ref_fasta"],
+            vcf_path=require_real_data["vcf_path"],
+            bed_path=require_real_data["bed_path"],
+            ref_fasta=require_real_data["ref_fasta"],
             gvl_cache_dir=cache_dir,
         )
         b2 = GenVarLoaderSequenceBuilder(
-            vcf_path=real_gvl_cfg["vcf_path"],
-            bed_path=real_gvl_cfg["bed_path"],
-            ref_fasta=real_gvl_cfg["ref_fasta"],
+            vcf_path=require_real_data["vcf_path"],
+            bed_path=require_real_data["bed_path"],
+            ref_fasta=require_real_data["ref_fasta"],
             gvl_cache_dir=cache_dir,
         )
 
@@ -162,28 +154,34 @@ class TestGenVarLoaderSequenceBuilder:
         assert p1.startswith(cache_dir), f"Path should be in cache_dir: {p1}"
         assert p1.endswith(".gvl"), f"Path should end with .gvl: {p1}"
 
-    def test_lazy_dataset_creation(self, gvl_skip, real_gvl_cfg, tmp_path_factory):
+    @pytest.mark.genvarloader
+    @pytest.mark.real
+    @skip_if_no_gvl
+    def test_lazy_dataset_creation(self, require_real_data, tmp_path_factory):
         """惰性创建：build() 调用前 _dataset 应为 None"""
         cache_dir = str(tmp_path_factory.mktemp("gvl_cache2"))
 
         builder = GenVarLoaderSequenceBuilder(
-            vcf_path=real_gvl_cfg["vcf_path"],
-            bed_path=real_gvl_cfg["bed_path"],
-            ref_fasta=real_gvl_cfg["ref_fasta"],
+            vcf_path=require_real_data["vcf_path"],
+            bed_path=require_real_data["bed_path"],
+            ref_fasta=require_real_data["ref_fasta"],
             gvl_cache_dir=cache_dir,
         )
 
         assert builder._dataset is None, "_dataset should be None before first use"
         assert builder._regions == [], "_regions should be empty before first use"
 
-    def test_dataset_persists_after_build(self, gvl_skip, real_gvl_cfg, tmp_path_factory):
+    @pytest.mark.genvarloader
+    @pytest.mark.real
+    @skip_if_no_gvl
+    def test_dataset_persists_after_build(self, require_real_data, tmp_path_factory):
         """第一次 build() 后 dataset 被缓存，后续调用不再重新打开"""
         cache_dir = str(tmp_path_factory.mktemp("gvl_cache3"))
 
         builder = GenVarLoaderSequenceBuilder(
-            vcf_path=real_gvl_cfg["vcf_path"],
-            bed_path=real_gvl_cfg["bed_path"],
-            ref_fasta=real_gvl_cfg["ref_fasta"],
+            vcf_path=require_real_data["vcf_path"],
+            bed_path=require_real_data["bed_path"],
+            ref_fasta=require_real_data["ref_fasta"],
             gvl_cache_dir=cache_dir,
         )
 
@@ -200,14 +198,17 @@ class TestGenVarLoaderSequenceBuilder:
 
         assert builder._dataset is not None, "_dataset should be populated after build()"
 
-    def test_build_returns_correct_keys(self, gvl_skip, real_gvl_cfg, tmp_path_factory):
+    @pytest.mark.genvarloader
+    @pytest.mark.real
+    @skip_if_no_gvl
+    def test_build_returns_correct_keys(self, require_real_data, tmp_path_factory):
         """build() 返回格式与 builtin SequenceBuilder 完全对齐"""
         cache_dir = str(tmp_path_factory.mktemp("gvl_cache4"))
 
         builder = GenVarLoaderSequenceBuilder(
-            vcf_path=real_gvl_cfg["vcf_path"],
-            bed_path=real_gvl_cfg["bed_path"],
-            ref_fasta=real_gvl_cfg["ref_fasta"],
+            vcf_path=require_real_data["vcf_path"],
+            bed_path=require_real_data["bed_path"],
+            ref_fasta=require_real_data["ref_fasta"],
             gvl_cache_dir=cache_dir,
         )
 
@@ -227,14 +228,17 @@ class TestGenVarLoaderSequenceBuilder:
             # sample 可能在 VCF 中不存在，返回 None 是合理的
             pass
 
-    def test_current_sample_injection(self, gvl_skip, real_gvl_cfg, tmp_path_factory):
+    @pytest.mark.genvarloader
+    @pytest.mark.real
+    @skip_if_no_gvl
+    def test_current_sample_injection(self, require_real_data, tmp_path_factory):
         """sample_name 回退到 builder.current_sample 注入"""
         cache_dir = str(tmp_path_factory.mktemp("gvl_cache5"))
 
         builder = GenVarLoaderSequenceBuilder(
-            vcf_path=real_gvl_cfg["vcf_path"],
-            bed_path=real_gvl_cfg["bed_path"],
-            ref_fasta=real_gvl_cfg["ref_fasta"],
+            vcf_path=require_real_data["vcf_path"],
+            bed_path=require_real_data["bed_path"],
+            ref_fasta=require_real_data["ref_fasta"],
             gvl_cache_dir=cache_dir,
         )
 
@@ -247,14 +251,17 @@ class TestGenVarLoaderSequenceBuilder:
         result1 = builder.build(v, [v], sample_name=None)
         assert result1 is None or isinstance(result1, dict)
 
-    def test_get_dataset_info(self, gvl_skip, real_gvl_cfg, tmp_path_factory):
+    @pytest.mark.genvarloader
+    @pytest.mark.real
+    @skip_if_no_gvl
+    def test_get_dataset_info(self, require_real_data, tmp_path_factory):
         """诊断接口返回合理信息"""
         cache_dir = str(tmp_path_factory.mktemp("gvl_cache6"))
 
         builder = GenVarLoaderSequenceBuilder(
-            vcf_path=real_gvl_cfg["vcf_path"],
-            bed_path=real_gvl_cfg["bed_path"],
-            ref_fasta=real_gvl_cfg["ref_fasta"],
+            vcf_path=require_real_data["vcf_path"],
+            bed_path=require_real_data["bed_path"],
+            ref_fasta=require_real_data["ref_fasta"],
             gvl_cache_dir=cache_dir,
         )
 

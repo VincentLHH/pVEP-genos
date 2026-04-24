@@ -30,8 +30,10 @@ python -m api.service \
 
 # 终端 2：运行测试
 pytest tests/test_04_api_service.py -v
-# 或指定 URL
-PVEPGENOS_API_URL=http://your-gpu-node:8000 pytest tests/test_04_api_service.py -v
+
+标记过滤：
+pytest tests/ -v -m "api"          # 仅运行 API 测试
+pytest tests/ -v -m "not api"       # 跳过 API 测试
 """
 
 import os
@@ -45,42 +47,23 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-
 # ─────────────────────────────────────────────────────────────
-# 环境检测
+# 使用 conftest.py 统一的环境检测和 skip helpers
 # ─────────────────────────────────────────────────────────────
-try:
-    import torch
-    HAS_CUDA = torch.cuda.is_available()
-except Exception:
-    HAS_CUDA = False
-
-skip_if_no_cuda = pytest.mark.skipif(
-    not HAS_CUDA,
-    reason="CUDA not available; API service requires GPU"
+from tests.conftest import (
+    HAS_CUDA,
+    skip_if_no_cuda,
+    require_api_service,
 )
 
-
 # ─────────────────────────────────────────────────────────────
-# Fixtures
+# Fixtures（复用 conftest 的通用 fixtures）
 # ─────────────────────────────────────────────────────────────
 
 @pytest.fixture(scope="session")
-def api_base_url(env_api_url):
-    """从环境变量读取 API 服务地址，默认 http://localhost:8000"""
-    return env_api_url
-
-
-@pytest.fixture(scope="session")
-def api_health(api_base_url):
-    """确保 API 服务在线"""
-    import httpx
-    try:
-        resp = httpx.get(f"{api_base_url}/health", timeout=10)
-        resp.raise_for_status()
-        return resp.json()
-    except Exception as e:
-        pytest.skip(f"API service not available at {api_base_url}: {e}", allow_module_level=True)
+def api_health(require_api_service):
+    """确保 API 服务在线（conftest 提供）"""
+    return require_api_service
 
 
 # ─────────────────────────────────────────────────────────────
@@ -115,58 +98,67 @@ def assert_embed_response(data, n_keys, methods):
 # ─────────────────────────────────────────────────────────────
 
 class TestAPIHealth:
-    """健康检查"""
+    """健康检查（api 标记）"""
 
+    @pytest.mark.api
     def test_health_ok(self, api_health):
         """服务正常时应返回 status=ok"""
         assert_health_response(api_health)
         print(f"API health: {api_health}")
 
+    @pytest.mark.api
     def test_health_shows_model(self, api_health):
         """health 应显示模型名称"""
         assert api_health["model_name"] == "Genos-1.2B"
 
+    @pytest.mark.api
     def test_health_shows_device(self, api_health):
         """health 应显示设备"""
         assert "cuda" in api_health["device"].lower() or "cpu" in api_health["device"].lower()
 
 
 class TestAPICache:
-    """Cache 管理"""
+    """Cache 管理（api 标记）"""
 
-    def test_cache_size(self, api_base_url, api_health):
+    @pytest.mark.api
+    def test_cache_size(self, require_api_service):
         """GET /cache/size 应返回 cache 条目数"""
         import httpx
-        resp = httpx.get(f"{api_base_url}/cache/size", timeout=10)
+        base_url = os.environ.get("PVEPGENOS_API_URL", "http://localhost:8000")
+        resp = httpx.get(f"{base_url}/cache/size", timeout=10)
         resp.raise_for_status()
         data = resp.json()
         assert "size" in data
         assert isinstance(data["size"], int)
         print(f"cache size: {data['size']}")
 
-    def test_clear_cache(self, api_base_url, api_health):
+    @pytest.mark.api
+    def test_clear_cache(self, require_api_service):
         """DELETE /cache 应清空 cache"""
         import httpx
+        base_url = os.environ.get("PVEPGENOS_API_URL", "http://localhost:8000")
 
         # 先清空
-        resp = httpx.delete(f"{api_base_url}/cache", timeout=10)
+        resp = httpx.delete(f"{base_url}/cache", timeout=10)
         resp.raise_for_status()
         data = resp.json()
         assert "cleared" in data
         print(f"cache cleared: {data['cleared']} entries removed")
 
         # 验证 size 为 0
-        resp2 = httpx.get(f"{api_base_url}/cache/size", timeout=10)
+        resp2 = httpx.get(f"{base_url}/cache/size", timeout=10)
         resp2.raise_for_status()
         assert resp2.json()["size"] == 0
 
 
 class TestAPIEmbed:
-    """批量推理"""
+    """批量推理（api 标记）"""
 
-    def test_embed_basic(self, api_base_url, api_health):
+    @pytest.mark.api
+    def test_embed_basic(self, require_api_service):
         """POST /embed 基本调用"""
         import httpx
+        base_url = os.environ.get("PVEPGENOS_API_URL", "http://localhost:8000")
 
         payload = {
             "seq_dict": {
@@ -175,31 +167,35 @@ class TestAPIEmbed:
             },
             "methods": ["mean"],
         }
-        resp = httpx.post(f"{api_base_url}/embed", json=payload, timeout=30)
+        resp = httpx.post(f"{base_url}/embed", json=payload, timeout=30)
         resp.raise_for_status()
         data = resp.json()
 
         assert_embed_response(data, ["seq1", "seq2"], ["mean"])
         print(f"embed: {len(data['result'])} seqs, cache_hits={data['cache_hits']}")
 
-    def test_embed_returns_all_methods(self, api_base_url, api_health):
+    @pytest.mark.api
+    def test_embed_returns_all_methods(self, require_api_service):
         """返回所有请求的 pooling 方法"""
         import httpx
+        base_url = os.environ.get("PVEPGENOS_API_URL", "http://localhost:8000")
 
         payload = {
             "seq_dict": {"s1": "ACGT" * 20},
             "methods": ["mean", "max", "last_token"],
         }
-        resp = httpx.post(f"{api_base_url}/embed", json=payload, timeout=30)
+        resp = httpx.post(f"{base_url}/embed", json=payload, timeout=30)
         resp.raise_for_status()
         data = resp.json()
 
         assert_embed_response(data, ["s1"], ["mean", "max", "last_token"])
         print(f"multi-method: mean/max/last_token all present")
 
-    def test_embed_dedup_on_server(self, api_base_url, api_health):
+    @pytest.mark.api
+    def test_embed_dedup_on_server(self, require_api_service):
         """相同序列应在服务端被去重（cache 命中）"""
         import httpx
+        base_url = os.environ.get("PVEPGENOS_API_URL", "http://localhost:8000")
 
         payload = {
             "seq_dict": {
@@ -208,7 +204,7 @@ class TestAPIEmbed:
             },
             "methods": ["mean"],
         }
-        resp = httpx.post(f"{api_base_url}/embed", json=payload, timeout=30)
+        resp = httpx.post(f"{base_url}/embed", json=payload, timeout=30)
         resp.raise_for_status()
         data = resp.json()
 
@@ -217,27 +213,31 @@ class TestAPIEmbed:
         assert data["result"]["a"]["mean"] == data["result"]["b"]["mean"]
         print(f"dedup: a==b confirmed, cache_size={data['total_cache_size']}")
 
-    def test_empty_seq_dict(self, api_base_url, api_health):
+    @pytest.mark.api
+    def test_empty_seq_dict(self, require_api_service):
         """空 seq_dict 应返回空 result"""
         import httpx
+        base_url = os.environ.get("PVEPGENOS_API_URL", "http://localhost:8000")
 
         payload = {"seq_dict": {}, "methods": ["mean"]}
-        resp = httpx.post(f"{api_base_url}/embed", json=payload, timeout=10)
+        resp = httpx.post(f"{base_url}/embed", json=payload, timeout=10)
         resp.raise_for_status()
         data = resp.json()
         assert data["result"] == {}
 
-    def test_cache_grows_after_requests(self, api_base_url, api_health):
+    @pytest.mark.api
+    def test_cache_grows_after_requests(self, require_api_service):
         """连续请求后 cache 应持续增长"""
         import httpx
+        base_url = os.environ.get("PVEPGENOS_API_URL", "http://localhost:8000")
 
         # 清空 cache
-        httpx.delete(f"{api_base_url}/cache", timeout=10).raise_for_status()
+        httpx.delete(f"{base_url}/cache", timeout=10).raise_for_status()
 
         # 推理 5 条新序列（确保互不相同，避免被服务端 dedup 去重）
         seqs = {f"s{i}": f"ACGT" * 16 + chr(65 + i) * 1 for i in range(5)}
         payload = {"seq_dict": seqs, "methods": ["mean"]}
-        resp = httpx.post(f"{api_base_url}/embed", json=payload, timeout=60)
+        resp = httpx.post(f"{base_url}/embed", json=payload, timeout=60)
         resp.raise_for_status()
         data = resp.json()
 
@@ -248,19 +248,22 @@ class TestAPIEmbed:
 
 
 class TestAPIConcurrency:
-    """并发请求"""
+    """并发请求（api + gpu 标记）"""
 
+    @pytest.mark.api
+    @pytest.mark.gpu
     @skip_if_no_cuda
-    def test_concurrent_requests(self, api_base_url, api_health):
+    def test_concurrent_requests(self, require_api_service):
         """多个并发请求均应成功"""
         import httpx
+        base_url = os.environ.get("PVEPGENOS_API_URL", "http://localhost:8000")
 
         def call_embed(seq_id):
             payload = {
                 "seq_dict": {f"{seq_id}": "ACGT" * 32},
                 "methods": ["mean"],
             }
-            resp = httpx.post(f"{api_base_url}/embed", json=payload, timeout=60)
+            resp = httpx.post(f"{base_url}/embed", json=payload, timeout=60)
             resp.raise_for_status()
             return resp.json()
 

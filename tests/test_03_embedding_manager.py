@@ -25,7 +25,11 @@ tests/test_03_embedding_manager.py
 export PVEPGENOS_MODEL_PATH=/path/to/Genos-1.2B
 pytest tests/test_03_embedding_manager.py -v
 
-# 或使用 CPU（慢，仅验证接口）
+标记过滤：
+pytest tests/ -v -m "gpu"        # 仅运行 GPU 测试
+pytest tests/ -v -m "not gpu"    # 跳过 GPU 测试
+
+或使用 CPU（慢，仅验证接口）：
 pytest tests/test_03_embedding_manager.py -v -k "cpu"
 """
 
@@ -39,47 +43,28 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 # ─────────────────────────────────────────────────────────────
-# 环境检测
+# 使用 conftest.py 统一的环境检测和 skip helpers
 # ─────────────────────────────────────────────────────────────
-try:
-    import torch
-    HAS_CUDA = torch.cuda.is_available()
-    GPU_COUNT = torch.cuda.device_count() if HAS_CUDA else 0
-except Exception:
-    HAS_CUDA = False
-    GPU_COUNT = 0
-
-skip_if_no_cuda = pytest.mark.skipif(
-    not HAS_CUDA,
-    reason="CUDA not available; run on GPU node or use API mode"
-)
-
-skip_if_no_model = pytest.mark.skipif(
-    True,  # 动态检测，见下面 fixture
-    reason="Model path not configured"
+from tests.conftest import (
+    HAS_CUDA,
+    GPU_COUNT,
+    skip_if_no_cuda,
+    require_model_path,
 )
 
 from models.embedding_manager import EmbeddingManager
 
 
 # ─────────────────────────────────────────────────────────────
-# Fixtures
+# Fixtures（复用 conftest 的通用 fixtures）
 # ─────────────────────────────────────────────────────────────
 
 @pytest.fixture(scope="session")
-def model_path(env_model_path):
-    """优先从环境变量 / config 读取模型路径"""
-    if env_model_path and os.path.exists(env_model_path):
-        return env_model_path
-    pytest.skip(f"Model path not found: {env_model_path}", allow_module_level=True)
-
-
-@pytest.fixture(scope="session")
-def manager_cuda(model_path):
-    """本地 CUDA 推理 manager"""
+def manager_cuda(require_model_path):
+    """本地 CUDA 推理 manager（需要 GPU）"""
     mgr = EmbeddingManager(
         model_name="Genos-1.2B",
-        model_path=model_path,
+        model_path=require_model_path,
         device="cuda",
         dtype="bfloat16",
         batch_size=8,
@@ -89,11 +74,11 @@ def manager_cuda(model_path):
 
 
 @pytest.fixture(scope="session")
-def manager_cpu(model_path):
+def manager_cpu(require_model_path):
     """CPU fallback manager（用于无 GPU 时验证接口）"""
     mgr = EmbeddingManager(
         model_name="Genos-1.2B",
-        model_path=model_path,
+        model_path=require_model_path,
         device="cpu",
         dtype="float32",
         batch_size=2,
@@ -133,14 +118,15 @@ def assert_embedding_result(result, expected_keys=None, min_dim=64):
 # ─────────────────────────────────────────────────────────────
 
 class TestEmbeddingManagerLoad:
-    """模型加载"""
+    """模型加载（gpu 标记）"""
 
+    @pytest.mark.gpu
     @skip_if_no_cuda
-    def test_model_loads_on_cuda(self, model_path):
+    def test_model_loads_on_cuda(self, require_model_path):
         """CUDA 模式下模型成功加载"""
         mgr = EmbeddingManager(
             model_name="TestModel",
-            model_path=model_path,
+            model_path=require_model_path,
             device="cuda",
             mode="local",
         )
@@ -148,11 +134,12 @@ class TestEmbeddingManagerLoad:
         assert "cuda" in mgr.device
         print(f"model loaded on {mgr.device}, param dtype={next(mgr.model.parameters()).dtype}")
 
-    def test_model_loads_on_cpu(self, model_path):
+    @pytest.mark.cpu
+    def test_model_loads_on_cpu(self, require_model_path):
         """CPU 模式下模型成功加载（无 GPU 时 fallback）"""
         mgr = EmbeddingManager(
             model_name="TestModel",
-            model_path=model_path,
+            model_path=require_model_path,
             device="cpu",
             dtype="float32",
             mode="local",
@@ -162,8 +149,9 @@ class TestEmbeddingManagerLoad:
 
 
 class TestBulkGetEmbeddingsBasic:
-    """基础推理功能"""
+    """基础推理功能（gpu 标记）"""
 
+    @pytest.mark.gpu
     @skip_if_no_cuda
     def test_basic_embedding_cuda(self, manager_cuda):
         """CUDA：单序列 embedding"""
@@ -171,12 +159,14 @@ class TestBulkGetEmbeddingsBasic:
         result = manager_cuda.bulk_get_embeddings(seqs, methods=["mean"])
         assert_embedding_result(result, expected_keys=["mean"])
 
+    @pytest.mark.cpu
     def test_basic_embedding_cpu(self, manager_cpu):
         """CPU：单序列 embedding（无 GPU 时 fallback）"""
         seqs = {"seq1": "ACGTACGTACGTACGT"}
         result = manager_cpu.bulk_get_embeddings(seqs, methods=["mean"])
         assert_embedding_result(result, expected_keys=["mean"])
 
+    @pytest.mark.gpu
     @skip_if_no_cuda
     def test_multiple_sequences(self, manager_cuda):
         """CUDA：多序列同时推理"""
@@ -187,11 +177,15 @@ class TestBulkGetEmbeddingsBasic:
         assert_embedding_result(result, expected_keys=["mean"])
         assert len(result) == 10
 
+    @pytest.mark.gpu
+    @skip_if_no_cuda
     def test_empty_input(self, manager_cuda):
         """空输入返回空 dict"""
         result = manager_cuda.bulk_get_embeddings({}, methods=["mean"])
         assert result == {}
 
+    @pytest.mark.gpu
+    @skip_if_no_cuda
     def test_single_key_multiple_methods(self, manager_cuda):
         """单序列，多 pooling 方法"""
         seqs = {"seq1": "ACGTACGT" * 10}
@@ -200,8 +194,9 @@ class TestBulkGetEmbeddingsBasic:
 
 
 class TestSequenceDeduplication:
-    """序列去重 + cache 命中"""
+    """序列去重 + cache 命中（gpu 标记）"""
 
+    @pytest.mark.gpu
     @skip_if_no_cuda
     def test_duplicate_sequence_same_result(self, manager_cuda):
         """相同序列的去重 key 应得到相同 embedding"""
@@ -217,6 +212,7 @@ class TestSequenceDeduplication:
         assert result["key_a"]["mean"] != result["key_c"]["mean"], \
             "Different sequences should have different embeddings"
 
+    @pytest.mark.gpu
     @skip_if_no_cuda
     def test_cache_hit_on_second_call(self, manager_cuda):
         """第二次调用相同序列应直接命中 cache"""
@@ -235,8 +231,9 @@ class TestSequenceDeduplication:
 
 
 class TestBatchChunking:
-    """Batch 分块（大序列量）"""
+    """Batch 分块（gpu 标记）"""
 
+    @pytest.mark.gpu
     @skip_if_no_cuda
     def test_large_batch_chunks(self, manager_cuda):
         """大批量序列（>batch_size）应正确分块"""
@@ -250,15 +247,16 @@ class TestBatchChunking:
 
 
 class TestSharedCacheInjection:
-    """shared_cache 注入（多卡 Manager().dict() 前置条件）"""
+    """shared_cache 注入（gpu 标记）"""
 
+    @pytest.mark.gpu
     @skip_if_no_cuda
-    def test_shared_cache_populated(self, model_path):
+    def test_shared_cache_populated(self, require_model_path):
         """通过 shared_cache 参数注入 dict，推理后 cache 内容存在其中"""
         shared = {}
         mgr = EmbeddingManager(
             model_name="TestShared",
-            model_path=model_path,
+            model_path=require_model_path,
             device="cuda",
             mode="local",
             shared_cache=shared,
@@ -271,8 +269,9 @@ class TestSharedCacheInjection:
         assert len(shared) > 0, "shared_cache should be populated after inference"
         print(f"shared_cache entries: {len(shared)}")
 
+    @pytest.mark.gpu
     @skip_if_no_cuda
-    def test_shared_cache_externally_filled(self, model_path):
+    def test_shared_cache_externally_filled(self, require_model_path):
         """外部预先填充 shared_cache，推理时应跳过已缓存的 key"""
         shared = {}
         # 预先写入一条 cache（模拟第一个 GPU 进程的结果）
@@ -280,7 +279,7 @@ class TestSharedCacheInjection:
 
         mgr = EmbeddingManager(
             model_name="TestPreFill",
-            model_path=model_path,
+            model_path=require_model_path,
             device="cuda",
             mode="local",
             shared_cache=shared,
@@ -297,8 +296,9 @@ class TestSharedCacheInjection:
 
 
 class TestLegacyInterface:
-    """兼容旧接口 get_embeddings()"""
+    """兼容旧接口 get_embeddings()（gpu 标记）"""
 
+    @pytest.mark.gpu
     @skip_if_no_cuda
     def test_get_embeddings_compat(self, manager_cuda):
         """get_embeddings() 应与 bulk_get_embeddings() 等价"""
@@ -311,8 +311,9 @@ class TestLegacyInterface:
 
 
 class TestPoolingMethods:
-    """多种 pooling 方法"""
+    """多种 pooling 方法（gpu 标记）"""
 
+    @pytest.mark.gpu
     @skip_if_no_cuda
     def test_all_pooling_methods(self, manager_cuda):
         """mean / max / last_token 均应返回非零向量"""
