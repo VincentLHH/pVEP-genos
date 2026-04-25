@@ -14,10 +14,24 @@ seq_builder:
   # ── GenVarLoader 专用配置 ──
   # .gvl 数据集缓存目录（不填则默认 /tmp/gvl_cache）
   gvl_cache_dir: ""
-  # 是否对负链区域做 reverse complement（默认 True，与 builtin 一致）
-  gvl_strandaware: true
+  # 是否对负链区域做 reverse complement
+  # 注意：新版 embedding 提取逻辑手动控制链方向，建议设为 false
+  gvl_strandaware: false
   # gvl.write 内存上限（默认 '4g'）
   gvl_max_mem: "4g"
+
+# -------------------------------------------------------
+# BED 拆分参数
+# -------------------------------------------------------
+bed_split:
+  # BED 输入模式：
+  #   "auto"     : 程序内部自动拆分（从原始 bed 生成 upstream/downstream 双行）
+  #   "presplit" : 输入 BED 已完成拆分（第四列以 _upstream/_downstream 结尾）
+  mode: auto
+
+  # 侧翼扩展长度 n（bp），必须满足 n >= window_size // 2 + max(len(alt), len(ref)) + 2
+  # 程序会在运行时校验此约束
+  n: 200
 
 # -------------------------------------------------------
 # 模型配置
@@ -43,12 +57,31 @@ model:
 
 window_size: 128
 
+# -------------------------------------------------------
+# Embedding 提取配置（新版个性化 VEP）
+# -------------------------------------------------------
 embedding:
-  methods: ["mean"]
+  # Tail pooling 方法：mean（默认）或 max
+  pooling: mean
+
+  # context_window：保留参数，暂不使用（当前 w = var_len + 2，固定计算）
+  context_window: null
+
+  # 定期保存间隔（每处理多少个 variant 保存一次）
   save_interval: 50
 
+  # 输出格式：json（默认，兼容旧版）、numpy（.npz）、h5（.h5）
+  output_format: json
+
+  # 是否在输出中保存重建的单倍型序列（可能较大）
+  save_haplotypes: true
+
+  # 全局 embedding 缓存（内存中，基于序列哈希）
+  # 若变异数量极大，可设为 false 以节省内存（每个样本独立推理，不共享缓存）
+  use_global_cache: true
+
 # -------------------------------------------------------
-# 输出控制
+# 输出控制（兼容旧版配置）
 # -------------------------------------------------------
 output:
   save_haplotypes: true   # 是否在 JSON 中保存重建的单倍型序列

@@ -1,54 +1,62 @@
 """
 core/genvarloader_builder.py
 =============================
-GenVarLoader 驱动的序列构建器，作为 SequenceBuilder 的替代实现。
+GenVarLoader 驱动的序列构建器（新版）。
 
-使用方式
+设计原则
 --------
-    builder = GenVarLoaderSequenceBuilder(
-        vcf_path="variants.vcf.gz",
-        bed_path="regions.bed",
-        ref_fasta="hg38.fa",
-        gvl_cache_dir="/tmp/gvl_cache",  # .gvl 文件缓存目录
-        strandaware=True,                  # 负链区域自动做 reverse complement
-    )
+1. 完全依赖 GenVarLoader 提供 Mut_hap 序列（不使用 pysam 手写 indel 对齐）；
+2. 从 BedRow 的第四列名称（chr_pos_ref_alt_upstream/downstream）反推变异信息；
+3. 基于反推的变异，对 genvarloader 返回的真实单倍型进行 WT_hap 恢复；
+4. WT_ref / Mut_ref 由 pysam 直接从参考基因组构建，不依赖 genvarloader；
+5. 返回与 SequenceBuilder 完全对齐的 SixSeqResult 结构。
 
-    seq_data = builder.build(variant, sample_name, all_variants)
-    # 返回格式与 SequenceBuilder.build() 完全一致：
-    # {
-    #     "ref_seq": "ACGT...",
-    #     "ref_comp": "T GCA...",
-    #     "hap1": {"mut_seq": "ACGT...", "mut_comp": "T GCA..."},
-    #     "hap2": {"mut_seq": "...",    "mut_comp": "..."},
-    # }
+WT_hap 恢复逻辑（方案B）
+------------------------
+genvarloader 返回的序列即是真实单倍型（Mut_hap 如果携带了目标变异，
+否则就是背景序列等价于 WT_hap）。
 
-与内置 SequenceBuilder 的区别
------------------------------
-- 内置：每个 variant 独立从参考基因组构建，依赖 Python 侧手写 indel 对齐逻辑。
-- GenVarLoader：GVL 数据集一次性索引 VCF，用 C 扩展极速重建，自动处理 indel 对齐。
+对于携带了目标变异的单倍型，需要从序列末尾定位目标变异区域并替换回 ref：
+- upstream  行：目标变异区域在序列末尾附近（最后 var_len + 1 bp），
+  从序列末尾向前数 1 位（因为末尾设计了 1bp 下游 padding）
+- downstream 行：目标变异区域在序列开头附近（前 var_len + 1 bp），
+  从序列开头向后数 1 位（因为开头设计了 1bp 上游 padding）
 
-核心差异
---------
-genvarloader 返回的 haplotypes 是 NDArray[np.bytes_]（字节数组），
-需要解码为 Python str 再供 embedding 模型使用。
-
-本类负责：
-1. 惰性创建 / 加载 .gvl 数据集（按 vcf_path + bed_path 哈希缓存）。
-2. 建立 variant_id → region_idx 的映射（用于精确定位 variant 对应的区域）。
-3. 将 numpy bytes 解码为 str，并与反向互补链一起返回。
+具体坐标：
+    upstream 行（长度 n + var_len + 1）：
+        变异区域在序列中的位置：[-（var_len+1）:-1]（不含最后1bp）
+        即 offset = len(seq) - var_len - 1
+    downstream 行（长度 var_len + 1 + n）：
+        变异区域在序列中的位置：[1 : 1+var_len]
+        即 offset = 1
 """
+
+from __future__ import annotations
 
 import hashlib
 import os
+import warnings
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pysam
 
-from core.variant import Variant
+from core.variant import (
+    BedRow,
+    Variant,
+    VariantBedSplit,
+    parse_var_name_from_bed_name,
+    reverse_complement as _rc_from_variant_module,
+)
+from core.sequence_builder import (
+    HapSeqPair,
+    SixSeqResult,
+    reverse_complement,
+)
 
 # 延迟导入 genvarloader（可能未安装），首次使用时才检查
 _gvl_module: Optional[object] = None
+
 
 def _get_gvl():
     global _gvl_module
@@ -64,34 +72,13 @@ def _get_gvl():
     return _gvl_module
 
 
-# --------------------------------------------------------------
-# 全局 dataset 缓存（进程内只加载一次）
-# --------------------------------------------------------------
-_dataset_cache: Dict[str, object] = {}
-_region_idx_cache: Dict[str, List[Optional[int]]] = {}  # var_id → region_idx (None = 未命中)
-
-
-# --------------------------------------------------------------
+# ===========================================================================
 # 工具函数
-# --------------------------------------------------------------
-def _region_key(chrom: str, start: int, end: int) -> str:
-    return f"{chrom}:{start}-{end}"
-
-
-def _variant_key(chrom: str, pos: int, ref: str, alt: str) -> str:
-    return f"{chrom}_{pos}_{ref}_{alt}"
-
+# ===========================================================================
 
 def _numpy_bytes_to_str(arr: np.ndarray) -> str:
     """
     将 NDArray[np.bytes_]、np.uint8 或 bytes 解码为 Python str。
-
-    兼容多种输入形状：
-    - 标量 np.bytes_ / bytes
-    - 1D np.bytes_ 数组
-    - 1D np.uint8 数组（单个字节）
-    - 2D / 3D 数组（先 flatten）
-    - dtype=object 数组（genvarloader Ragged 返回值）
     """
     if arr.ndim == 0:
         item = arr.item()
@@ -99,7 +86,6 @@ def _numpy_bytes_to_str(arr: np.ndarray) -> str:
             return item.decode("ascii")
         return str(item)
 
-    # 降维到一维
     flat = np.asarray(arr).ravel()
 
     if flat.dtype == np.bytes_:
@@ -109,40 +95,53 @@ def _numpy_bytes_to_str(arr: np.ndarray) -> str:
         return bytes(flat.tolist()).decode("ascii")
 
     if flat.dtype == object:
-        # genvarloader Ragged 可能返回 Python bytes 列表
         try:
-            return b"".join(bytes(v) if isinstance(v, (list, tuple)) else v for v in flat).decode("ascii")
+            return b"".join(
+                bytes(v) if isinstance(v, (list, tuple)) else v for v in flat
+            ).decode("ascii")
         except TypeError:
             pass
 
-    # 兜底：整数数组（ASCII 码）
     try:
         return bytes(flat.tolist()).decode("ascii")
     except Exception:
         return "".join(str(x) for x in flat)
 
 
-def _reverse_complement(seq: str) -> str:
-    complement = str.maketrans("ATCGatcg", "TAGCtagc")
-    return seq[::-1].translate(complement)
+def _decode_hap(hap_raw) -> str:
+    """统一解码 genvarloader 返回的单倍型数据为 Python str。"""
+    if hasattr(hap_raw, "to_bytes"):
+        hap_raw = hap_raw.to_bytes()
+    elif hasattr(hap_raw, "to_list"):
+        lst = hap_raw.to_list()
+        if isinstance(lst, list) and all(
+            isinstance(x, (bytes, bytearray)) for x in lst
+        ):
+            return b"".join(bytes(x) for x in lst).decode("ascii")
+    arr = np.asarray(hap_raw)
+    return _numpy_bytes_to_str(arr)
 
 
-# --------------------------------------------------------------
+# ===========================================================================
 # 主类
-# --------------------------------------------------------------
+# ===========================================================================
+
 class GenVarLoaderSequenceBuilder:
     """
-    基于 GenVarLoader 的序列构建器。
+    基于 GenVarLoader 的序列构建器（新版，适配 6 种序列框架）。
 
     参数
     ----
     vcf_path       : VCF 文件路径（.vcf.gz 或 .vcf）
-    bed_path       : BED 文件路径（定义感兴趣的区域）
+    bed_path       : BED 文件路径（已拆分为 upstream/downstream 行）
     ref_fasta      : 参考基因组 FASTA 路径
     gvl_cache_dir  : .gvl 数据集缓存目录（默认 /tmp/gvl_cache）
-    strandaware    : 是否对负链区域做 reverse complement（默认 True，与内置 builder 一致）
+    strandaware    : 是否对负链区域做 reverse complement（默认 False，
+                     我们手动控制方向，不让 GVL 自动处理）
     max_mem        : gvl.write 内存上限（默认 '4g'）
     overwrite      : 是否强制覆盖已有 .gvl 文件（默认 False）
+    window_size    : 模型推理上下文窗口大小（仅用于日志提示）
+    n              : BED 拆分侧翼长度（与 BedRow 中的 n 保持一致，用于反算变异偏移）
     """
 
     def __init__(
@@ -151,10 +150,11 @@ class GenVarLoaderSequenceBuilder:
         bed_path: str,
         ref_fasta: str,
         gvl_cache_dir: str = "/tmp/gvl_cache",
-        strandaware: bool = True,
+        strandaware: bool = False,
         max_mem: str = "4g",
         overwrite: bool = False,
         window_size: int = 128,
+        n: int = 200,
     ):
         self.vcf_path = vcf_path
         self.bed_path = bed_path
@@ -164,38 +164,36 @@ class GenVarLoaderSequenceBuilder:
         self.max_mem = max_mem
         self.overwrite = overwrite
         self.window_size = window_size
+        self.n = n
         self._half_window = window_size // 2
+
         self._fasta: Optional[pysam.FastaFile] = None
-
-        # 惰性初始化
         self._dataset: Optional[object] = None
-        self._regions: List[Tuple[str, int, int]] = []
-        self._var_to_region: Dict[str, int] = {}
+        self._bed_rows: List[BedRow] = []
+        # name → region_idx 的映射（name 是 BedRow 的 name 字段）
+        self._name_to_idx: Dict[str, int] = {}
+        # 当前处理的样本名（由 process_all 注入）
+        self.current_sample: Optional[str] = None
 
     # =========================================================
-    # 惰性加载 / 创建 GVL 数据集
+    # 惰性初始化
     # =========================================================
+
     def _gvl_path(self) -> str:
-        """根据 vcf + bed 生成确定性的 .gvl 文件路径。"""
+        """根据 vcf + bed 内容生成确定性的 .gvl 文件路径。"""
         os.makedirs(self.gvl_cache_dir, exist_ok=True)
         key = hashlib.md5(
             f"{self.vcf_path}{self.bed_path}".encode()
         ).hexdigest()[:12]
         return os.path.join(self.gvl_cache_dir, f"{key}.gvl")
 
-    def _load_regions(self) -> List[Tuple[str, int, int]]:
-        """解析 BED 文件，返回 chrom/start/end 三元组列表。"""
-        regions = []
-        with open(self.bed_path) as f:
-            for line in f:
-                if line.startswith("#") or not line.strip():
-                    continue
-                parts = line.strip().split()
-                regions.append((parts[0], int(parts[1]), int(parts[2])))
-        return regions
+    def _ensure_fasta(self) -> pysam.FastaFile:
+        if self._fasta is None:
+            self._fasta = pysam.FastaFile(self.ref_fasta)
+        return self._fasta
 
     def _ensure_dataset(self) -> object:
-        """惰性创建 / 打开 .gvl 数据集。"""
+        """惰性创建 / 打开 .gvl 数据集，并建立 name → region_idx 映射。"""
         if self._dataset is not None:
             return self._dataset
 
@@ -210,71 +208,347 @@ class GenVarLoaderSequenceBuilder:
                 max_mem=self.max_mem,
                 overwrite=self.overwrite,
             )
-            print(f"✅ GenVarLoader: dataset built")
+            print("✅ GenVarLoader: dataset built")
         else:
             print(f"📂 GenVarLoader: loading cached dataset from {gvl_path} ...")
 
-        self._dataset = _get_gvl().Dataset.open(
+        ds = _get_gvl().Dataset.open(
             path=gvl_path,
             reference=self.ref_fasta,
         )
 
-        # 关键：必须显式配置返回类型。
-        # 参考用户官方脚本：dataset.with_len("ragged").with_seqs("haplotypes")
-        # - with_len("ragged"): 返回不等长单倍型（默认返回固定长度，索引行为不同）
-        # - with_seqs("haplotypes"): 返回 haplotype 数组而非 RaggedVariants 对象
-        #   否则默认 RaggedVariants.squeeze() 只接受 **kwargs，
-        #   而 genvarloader 内部 __getitem__ 传位置参数，导致报错
-        #   "takes 1 positional argument but 2 were given"
-        # 参考：https://genvarloader.readthedocs.io/en/latest/api.html
-        self._dataset = self._dataset.with_len("ragged").with_seqs("haplotypes")
+        # with_len("ragged")：返回不等长单倍型（per-region 实际长度）
+        # with_seqs("haplotypes")：返回 haplotype bytes 数组
+        ds = ds.with_len("ragged").with_seqs("haplotypes")
 
-        # 设置是否对负链做 reverse complement（与内置 builder 行为一致）
         if not self.strandaware:
-            self._dataset = self._dataset.with_settings(rc_neg=False)
+            # 我们手动控制链方向，禁止 GVL 自动 reverse complement
+            ds = ds.with_settings(rc_neg=False)
 
-        # 预解析 regions（用于 variant → region_idx 映射）
-        self._regions = self._load_regions()
+        self._dataset = ds
 
-        # 建立 variant_id → region_idx 反查表
-        self._var_to_region.clear()
-        for idx, (chrom, start, end) in enumerate(self._regions):
-            vid = f"{chrom}_{start}_{'REF'}_{'ALT'}"  # 仅用区域左端点作为 key
-            # 更精确的做法是遍历 variant，但先按下不表——见 build() 中的二次过滤
-            # 这里先存 (chrom, start, end) → idx
-            self._var_to_region[_region_key(chrom, start, end)] = idx
+        # 从 dataset.regions 获取 name 列表，建立 name → index 映射
+        # 参考用户官方脚本：
+        #   vars = dataset.regions["name"].to_list()
+        try:
+            names = self._dataset.regions["name"].to_list()
+            self._name_to_idx = {name: idx for idx, name in enumerate(names)}
+            print(f"[GVL] Loaded {len(names)} regions from dataset.")
+        except Exception as e:
+            warnings.warn(
+                f"[GVL] Failed to read dataset.regions['name']: {e}. "
+                "Will fall back to positional index lookup."
+            )
+            # 回退：直接读取 bed 文件建立映射
+            self._bed_rows = self._load_bed_rows()
+            self._name_to_idx = {
+                row.name: idx for idx, row in enumerate(self._bed_rows)
+            }
 
         return self._dataset
 
-    def _get_fasta(self) -> pysam.FastaFile:
-        """惰性加载参考基因组 FASTA。"""
-        if self._fasta is None:
-            self._fasta = pysam.FastaFile(self.ref_fasta)
-        return self._fasta
+    def _load_bed_rows(self) -> List[BedRow]:
+        """解析 BED 文件，返回 BedRow 列表（含第四列 name）。"""
+        from core.variant import load_bed
+        return load_bed(self.bed_path)
 
-    def _fetch_ref_window(self, variant: Variant) -> Optional[str]:
-        """
-        从参考基因组获取以 variant 为中心的窗口序列。
-        与内置 SequenceBuilder._get_ref_window() 逻辑完全一致：
-        left = pos - half_window, right = pos + len(ref) - 1 + half_window
-        """
-        pos = variant.pos
-        left = pos - self._half_window
-        right = pos + len(variant.ref) - 1 + self._half_window
+    # =========================================================
+    # 核心构建接口（新版）
+    # =========================================================
 
-        if left < 1:
+    def build_six_seqs(
+        self,
+        bed_split: VariantBedSplit,
+        center_variant: Variant,
+        sample_name: Optional[str] = None,
+    ) -> Optional[Dict[str, SixSeqResult]]:
+        """
+        对 VariantBedSplit 中的上游和下游 BedRow 各构建 SixSeqResult。
+
+        返回
+        ----
+        {"upstream": SixSeqResult, "downstream": SixSeqResult}
+        若任意一行构建失败则返回 None。
+        """
+        sname = sample_name or self.current_sample
+        if sname is None:
+            raise ValueError(
+                "sample_name must be provided either as parameter or "
+                "via builder.current_sample"
+            )
+
+        up_result = self.build_from_bed(bed_split.upstream, center_variant, sname)
+        if up_result is None:
             return None
 
+        dn_result = self.build_from_bed(bed_split.downstream, center_variant, sname)
+        if dn_result is None:
+            return None
+
+        return {"upstream": up_result, "downstream": dn_result}
+
+    def build_from_bed(
+        self,
+        bed_row: BedRow,
+        center_variant: Variant,
+        sample_name: str,
+    ) -> Optional[SixSeqResult]:
+        """
+        基于一行 BedRow 构建 SixSeqResult。
+
+        步骤
+        ----
+        1. 从 FASTA 获取 WT_ref
+        2. 构建 Mut_ref（在 WT_ref 中强制注入目标变异）
+        3. 通过 genvarloader 获取该样本在该行的 hap1/hap2 序列（= Mut_hap）
+        4. 根据基因型决定是否需要恢复 WT_hap：
+           - 携带 alt → 从 Mut_hap 中移除目标变异得到 WT_hap
+           - 不携带 alt → WT_hap = Mut_hap（直接引用，标记等价）
+        """
+        ds = self._ensure_dataset()
+
+        # 1. 从 FASTA 获取 WT_ref
+        wt_ref = self._fetch_bed_row(bed_row)
+        if wt_ref is None:
+            return None
+
+        # 2. 构建 Mut_ref
+        mut_ref = self._inject_variant_into_ref(wt_ref, bed_row, center_variant)
+        if mut_ref is None:
+            return None
+
+        # 3. 定位 region_idx
+        region_idx = self._name_to_idx.get(bed_row.name)
+        if region_idx is None:
+            warnings.warn(
+                f"[GVL] BedRow name '{bed_row.name}' not found in dataset. "
+                f"Available names (first 5): {list(self._name_to_idx.keys())[:5]}"
+            )
+            return None
+
+        # 4. 定位 sample_idx
         try:
-            fasta = self._get_fasta()
-            seq = fasta.fetch(variant.chrom, left - 1, right).upper()
-            return seq
-        except Exception:
+            sample_names = list(ds.samples)
+        except AttributeError:
+            sample_names = None
+
+        if sample_names is None:
+            sample_idx = 0
+        else:
+            if sample_name not in sample_names:
+                warnings.warn(
+                    f"[GVL] Sample '{sample_name}' not in dataset. "
+                    f"Available: {sample_names[:5]}"
+                )
+                return None
+            sample_idx = sample_names.index(sample_name)
+
+        # 5. 从 genvarloader 获取单倍型序列
+        try:
+            haps = ds[region_idx, sample_idx]
+        except Exception as e:
+            warnings.warn(
+                f"[GVL] ds[{region_idx}, {sample_idx}] failed: {type(e).__name__}: {e}"
+            )
             return None
 
+        hap1_seq = _decode_hap(haps[0])
+        hap2_seq = _decode_hap(haps[1])
+
+        if not hap1_seq or not hap2_seq:
+            return None
+
+        # 6. 构建 hap1 和 hap2 的 Mut/WT 序列对
+        direction = "upstream" if bed_row.is_upstream else "downstream"
+        is_upstream = bed_row.is_upstream
+
+        hap1_pair = self._build_hap_pair_from_gvl(
+            hap_seq=hap1_seq,
+            center_variant=center_variant,
+            bed_row=bed_row,
+            is_upstream=is_upstream,
+            hap_index=0,
+        )
+        hap2_pair = self._build_hap_pair_from_gvl(
+            hap_seq=hap2_seq,
+            center_variant=center_variant,
+            bed_row=bed_row,
+            is_upstream=is_upstream,
+            hap_index=1,
+        )
+
+        return SixSeqResult(
+            direction=direction,
+            hap1=hap1_pair,
+            hap2=hap2_pair,
+            ref_pair=HapSeqPair(
+                mut=mut_ref,
+                wt=wt_ref,
+                wt_is_alias_of_mut=False,
+            ),
+        )
+
     # =========================================================
-    # 核心接口：与 SequenceBuilder.build() 对齐
+    # 内部实现：WT_hap 恢复（方案B：在 GVL 返回的序列上定位并替换）
     # =========================================================
+
+    def _build_hap_pair_from_gvl(
+        self,
+        hap_seq: str,
+        center_variant: Variant,
+        bed_row: BedRow,
+        is_upstream: bool,
+        hap_index: int,
+    ) -> HapSeqPair:
+        """
+        从 genvarloader 返回的真实单倍型序列构建 HapSeqPair。
+
+        逻辑
+        ----
+        - genvarloader 返回的就是真实单倍型，如果该 hap 携带目标变异，
+          则 hap_seq 中目标位置是 alt；否则是 ref 等位基因（或背景序列）。
+        - 我们无法从外部直接知道序列内容，但可以根据基因型判断：
+            hap_has_alt = center_variant.gt[hap_index] == 1
+          若携带，则需要从 hap_seq 中恢复 WT_hap（移除目标变异，替换回 ref）。
+
+        定位目标变异在 hap_seq 中的偏移
+        --------------------------------
+        由于 genvarloader 已经处理好了全部背景变异的 indel 对齐，
+        我们无法直接用参考基因组坐标来定位。但 BED 行的设计已保证：
+
+        upstream 行：变异区域紧邻序列末尾前 1 bp
+            目标变异的 alt 在 hap_seq 中的偏移 = len(hap_seq) - var_len_in_hap - 1
+            其中 var_len_in_hap = len(alt) if hap_has_alt else len(ref)
+
+        downstream 行：变异区域紧邻序列开头后 1 bp
+            目标变异的 alt/ref 在 hap_seq 中的偏移 = 1
+
+        注意：这里使用 alt 长度（而非 ref 长度），因为 hap_seq 已经是
+        应用了变异之后的序列。
+        """
+        hap_has_alt = (
+            center_variant.gt is not None
+            and center_variant.gt[hap_index] == 1
+        )
+
+        if not hap_has_alt:
+            # 不携带目标变异，Mut == WT
+            return HapSeqPair(mut=hap_seq, wt=hap_seq, wt_is_alias_of_mut=True)
+
+        # 携带目标变异，需要恢复 WT_hap
+        wt_hap = self._restore_wt_from_mut_hap(
+            mut_hap=hap_seq,
+            center_variant=center_variant,
+            is_upstream=is_upstream,
+        )
+
+        if wt_hap is None:
+            warnings.warn(
+                f"[GVL] Failed to restore WT_hap for variant {center_variant.id}, "
+                f"hap_index={hap_index}. Falling back to Mut=WT."
+            )
+            return HapSeqPair(mut=hap_seq, wt=hap_seq, wt_is_alias_of_mut=True)
+
+        return HapSeqPair(mut=hap_seq, wt=wt_hap, wt_is_alias_of_mut=False)
+
+    def _restore_wt_from_mut_hap(
+        self,
+        mut_hap: str,
+        center_variant: Variant,
+        is_upstream: bool,
+    ) -> Optional[str]:
+        """
+        从 Mut_hap（携带目标变异）恢复 WT_hap（移除目标变异，替换为 ref）。
+
+        定位逻辑
+        --------
+        upstream 行（序列正向，变异在末尾前 1bp）：
+            alt 在序列中的位置：len(mut_hap) - len(alt) - 1
+            替换为 ref 即可
+
+        downstream 行（序列正向，变异在开头后 1bp）：
+            alt 在序列中的位置：offset = 1
+            替换为 ref 即可
+
+        Returns
+        -------
+        恢复后的 WT_hap 字符串，或 None（若定位越界）
+        """
+        ref = center_variant.ref
+        alt = center_variant.alt
+        alt_len = len(alt)
+        ref_len = len(ref)
+
+        if is_upstream:
+            # upstream：alt 在序列末尾前 1bp
+            # 末尾设计：[... alt_seq ... 下游1bp] → alt 从 len(seq)-alt_len-1 开始
+            offset = len(mut_hap) - alt_len - 1
+        else:
+            # downstream：alt 在序列开头后 1bp
+            # 开头设计：[上游1bp, alt_seq, ...] → alt 从 offset=1 开始
+            offset = 1
+
+        if offset < 0 or offset + alt_len > len(mut_hap):
+            return None
+
+        current = mut_hap[offset: offset + alt_len]
+
+        if current.upper() != alt.upper():
+            # 序列不匹配，可能是 indel 引入了额外偏移，记录警告但仍尝试恢复
+            warnings.warn(
+                f"[GVL] WT_hap restore: expected alt={alt!r} at offset {offset}, "
+                f"found {current!r}. This may indicate background indel shift. "
+                f"Proceeding with forced replacement."
+            )
+
+        wt_hap = mut_hap[:offset] + ref + mut_hap[offset + alt_len:]
+        return wt_hap
+
+    # =========================================================
+    # 参考基因组操作（WT_ref / Mut_ref）
+    # =========================================================
+
+    def _fetch_bed_row(self, bed_row: BedRow) -> Optional[str]:
+        """
+        从 FASTA 按 BedRow 的 0-based 坐标提取序列（WT_ref）。
+        pysam.fetch 接受 0-based 左闭右开坐标。
+        """
+        try:
+            fasta = self._ensure_fasta()
+            seq = fasta.fetch(bed_row.chrom, bed_row.start, bed_row.end).upper()
+            return seq
+        except Exception as e:
+            warnings.warn(f"[GVL] FASTA fetch failed for {bed_row}: {e}")
+            return None
+
+    def _inject_variant_into_ref(
+        self,
+        ref_seq: str,
+        bed_row: BedRow,
+        variant: Variant,
+    ) -> Optional[str]:
+        """
+        在 ref_seq 中把目标变异的 ref 等位基因替换为 alt（强制，不考虑基因型）。
+        坐标换算：offset = variant.pos - 1 - bed_row.start
+        """
+        offset = variant.pos - 1 - bed_row.start
+
+        if offset < 0 or offset + len(variant.ref) > len(ref_seq):
+            return None
+
+        current = ref_seq[offset: offset + len(variant.ref)]
+        if current.upper() != variant.ref.upper():
+            warnings.warn(
+                f"[GVL] Mut_ref injection: ref mismatch for {variant.id} at offset {offset}. "
+                f"Expected {variant.ref!r}, found {current!r}. Forcing injection."
+            )
+
+        return ref_seq[:offset] + variant.alt + ref_seq[offset + len(variant.ref):]
+
+    # =========================================================
+    # 兼容旧接口（已废弃）
+    # =========================================================
+
     def build(
         self,
         center_variant: Variant,
@@ -282,138 +556,89 @@ class GenVarLoaderSequenceBuilder:
         sample_name: Optional[str] = None,
     ) -> Optional[Dict]:
         """
-        重建指定样本在 center_variant 所在窗口的单倍型序列。
-
-        参数
-        ----
-        center_variant : 中心变异（用于定位区域窗口）
-        all_variants   : 窗口内的所有变异列表（用于与 GenVarLoader 结果交叉验证，
-                         可选，传入 None 则跳过过滤）
-        sample_name     : 样本名称。若为 None，则回退到
-                         builder.current_sample（由 process_all 注入）。
-
-        返回
-        ----
-        dict（与 SequenceBuilder.build() 返回格式一致）：
-        {
-            "ref_seq": "ACGT...",
-            "ref_comp": "T GCA...",
-            "hap1": {"mut_seq": "...", "mut_comp": "..."},
-            "hap2": {"mut_seq": "...", "mut_comp": "..."},
-        }
-        若 variant 超出范围或无法重建则返回 None。
+        [已废弃] 旧版 build() 接口，仅保留兼容旧测试。
+        新代码请使用 build_six_seqs() 或 build_from_bed()。
         """
-        # 回退到 process_all 注入的当前样本名
-        if sample_name is None and hasattr(self, "current_sample"):
-            sample_name = self.current_sample
+        warnings.warn(
+            "GenVarLoaderSequenceBuilder.build() is deprecated. "
+            "Use build_six_seqs() or build_from_bed() instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
+        sname = sample_name or self.current_sample
+        if sname is None:
+            return None
 
         ds = self._ensure_dataset()
-
-        # ── 1. 定位 region_idx ──
         chrom = center_variant.chrom
         pos = center_variant.pos
 
-        # 在 self._regions 中二分查找覆盖 pos 的区域
         region_idx = None
-        for idx, (rc, rs, re) in enumerate(self._regions):
-            if rc == chrom and rs <= pos <= re:
+        for name, idx in self._name_to_idx.items():
+            # 通过 region 坐标范围确认
+            if chrom in name and str(pos) in name:
                 region_idx = idx
                 break
 
         if region_idx is None:
             return None
 
-        # ── 2. 获取样本在数据集中的列索引 ──
-        # 正确 API：ds.samples 返回 list[str]，ds.n_samples 返回样本数量
-        # 参考：https://genvarloader.readthedocs.io/en/latest/api.html
         try:
             sample_names = list(ds.samples)
         except AttributeError:
             sample_names = None
 
         if sample_names is None:
-            print("[DEBUG] ds.samples unavailable, assuming single sample at index 0")
             sample_idx = 0
         else:
-            if sample_name not in sample_names:
-                print(f"[DEBUG] sample '{sample_name}' not found in dataset. Available: {sample_names}")
+            if sname not in sample_names:
                 return None
-            sample_idx = sample_names.index(sample_name)
+            sample_idx = sample_names.index(sname)
 
-        # ── 3. 重建单倍型序列 ──
-        # 参考用户官方脚本：
-        #   haps = dataset[region_idx, sample_idx]
-        #   seq1 = haps[0].decode()  # haplotype 1
-        #   seq2 = haps[1].decode()  # haplotype 2
-        # haps[0] = allele 0 block, haps[1] = allele 1 block（对于二倍体）
-        # 注意：每个 block 可能是多个 bytes 元素（genvarloader 用 Ragged 存储），
-        # 需要 .to_list() 或解码整个 block，而不是取某个元素
         try:
             haps = ds[region_idx, sample_idx]
-        except Exception as e:
-            print(f"[DEBUG] ds[{region_idx}, {sample_idx}] raised: {type(e).__name__}: {e}")
+        except Exception:
             return None
 
-        # haps 是该样本在该区域的 haplotype blocks
-        # haps[0] = allele 0 的序列，haps[1] = allele 1 的序列
-        # 对于 with_seqs("haplotypes")，每个 haps[i] 是一个 bytes 对象或字节数组
-        # 直接取第一个 block 就是 hap1，第二个 block 就是 hap2
-
-        # 处理 haps 的不同返回格式
-        hap1_raw = haps[0]
-        hap2_raw = haps[1]
-
-        # hap1_raw / hap2_raw 可能是 bytes, bytearray, np.bytes_,
-        # 或 Ragged/AnnotatedHaps 对象，需要统一解码
-        def _decode_hap(hap_raw):
-            # Ragged/AnnotatedHaps：尝试 .to_bytes() 或直接转 bytes
-            if hasattr(hap_raw, 'to_bytes'):
-                hap_raw = hap_raw.to_bytes()
-            elif hasattr(hap_raw, 'to_list'):
-                # Ragged 结构：to_list() 返回 bytes 列表
-                lst = hap_raw.to_list()
-                if isinstance(lst, list) and all(isinstance(x, (bytes, bytearray)) for x in lst):
-                    return b''.join(bytes(x) for x in lst).decode('ascii')
-            # 统一转为 numpy bytes 数组后解码
-            arr = np.asarray(hap_raw)
-            return _numpy_bytes_to_str(arr)
-
-        hap1_seq = _decode_hap(hap1_raw)
-        hap2_seq = _decode_hap(hap2_raw)
+        hap1_seq = _decode_hap(haps[0])
+        hap2_seq = _decode_hap(haps[1])
 
         if not hap1_seq or not hap2_seq:
             return None
 
-        # ref_seq 必须直接从 FASTA 获取原始参考序列，与内置 builder 完全一致。
-        # 注意：hap1_seq/hap2_seq 是 genvarloader 重建的单倍型，
-        # 其中可能包含 variant，不应作为 ref_seq。
-        # 对于 homo ALT 的样本，两个 hap 都是 ALT，没有 REF allele，
-        # 必须从 FASTA 获取纯参考序列。
-        ref_seq = self._fetch_ref_window(center_variant)
-        if ref_seq is None:
+        fasta = self._ensure_fasta()
+        left = pos - self._half_window
+        right = pos + len(center_variant.ref) - 1 + self._half_window
+        if left < 1:
+            return None
+        try:
+            ref_seq = fasta.fetch(center_variant.chrom, left - 1, right).upper()
+        except Exception:
             return None
 
         return {
             "ref_seq": ref_seq,
-            "ref_comp": _reverse_complement(ref_seq),
+            "ref_comp": reverse_complement(ref_seq),
             "hap1": {
                 "mut_seq": hap1_seq,
-                "mut_comp": _reverse_complement(hap1_seq),
+                "mut_comp": reverse_complement(hap1_seq),
             },
             "hap2": {
                 "mut_seq": hap2_seq,
-                "mut_comp": _reverse_complement(hap2_seq),
+                "mut_comp": reverse_complement(hap2_seq),
             },
         }
 
     # =========================================================
     # 诊断接口
     # =========================================================
+
     def get_dataset_info(self) -> Dict:
         """返回数据集统计信息（用于 debug）。"""
         ds = self._ensure_dataset()
         return {
-            "n_regions": len(self._regions),
+            "n_regions": len(self._name_to_idx),
             "n_samples": len(ds.samples) if hasattr(ds, "samples") else "unknown",
             "sample_names": list(ds.samples) if hasattr(ds, "samples") else [],
             "gvl_path": self._gvl_path(),

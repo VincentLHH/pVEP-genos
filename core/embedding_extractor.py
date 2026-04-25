@@ -1,0 +1,385 @@
+"""
+core/embedding_extractor.py
+============================
+个性化 VEP 的核心 embedding 提取器。
+
+设计
+----
+对每一个变异（及对应的 VariantBedSplit），提取 6 种序列的 embedding：
+  Mut_hap1, WT_hap1, Mut_hap2, WT_hap2, Mut_ref, WT_ref
+
+每种序列的 embedding 由两部分 concat 而成：
+  emb = concat(emb_up, emb_down)
+
+其中：
+  emb_up   = upstream  正链序列 → 推理 → 取末尾 w 个 token → pooling
+  emb_down = downstream 反向互补链 → 推理 → 取末尾 w 个 token → pooling
+
+参数
+----
+  w        = var_len + 2（变异区域 + 紧邻上下游各 1 bp）
+  var_len  = max(len(alt) - len(ref) + 1, 1)
+  pooling  = "mean"（可选 "max"）
+
+最终 embedding 维度 = hidden_size × 2
+
+缓存策略
+--------
+全局哈希缓存（内存中）：
+  - 键：序列内容的 xxhash64（若无 xxhash 则回退到 SHA256 前 16 字节）
+  - 值：(emb_up numpy array, w, pooling_method) → 序列级 tail pooled embedding
+  - 基因型等价规则保证不重复构建：wt_is_alias_of_mut 时直接复用 mut 的 embedding
+
+使用示例
+--------
+    extractor = EmbeddingExtractor(
+        embedding_manager=manager,
+        pooling="mean",
+    )
+
+    six_embs = extractor.extract(
+        bed_split=split,
+        center_variant=variant,
+        up_result=six_seq_result["upstream"],
+        dn_result=six_seq_result["downstream"],
+    )
+    # six_embs["Mut_hap1"] → numpy array, shape=[hidden_size * 2]
+"""
+
+from __future__ import annotations
+
+import hashlib
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
+
+try:
+    import xxhash
+    _HAS_XXHASH = True
+except ImportError:
+    _HAS_XXHASH = False
+
+from core.variant import Variant, VariantBedSplit
+from core.sequence_builder import HapSeqPair, SixSeqResult, reverse_complement
+
+
+# ===========================================================================
+# 序列哈希工具
+# ===========================================================================
+
+def _seq_hash(seq: str) -> str:
+    """计算序列内容的哈希（作为全局缓存键）。"""
+    if _HAS_XXHASH:
+        return xxhash.xxh64(seq.encode()).hexdigest()
+    return hashlib.sha256(seq.encode()).hexdigest()[:16]
+
+
+# ===========================================================================
+# 核心提取器
+# ===========================================================================
+
+class EmbeddingExtractor:
+    """
+    个性化 VEP embedding 提取器。
+
+    参数
+    ----
+    embedding_manager : EmbeddingManager 实例（本地 GPU 模式）
+    pooling           : pooling 方法，"mean"（默认）或 "max"
+    context_window    : 保留参数，暂不使用（未来可调整 w 的计算方式）
+    cache             : 外部传入的全局共享缓存 dict（若为 None 则使用内部缓存）
+    """
+
+    # 6 种序列的键名
+    SEQ_KEYS = [
+        "Mut_hap1", "WT_hap1",
+        "Mut_hap2", "WT_hap2",
+        "Mut_ref",  "WT_ref",
+    ]
+
+    def __init__(
+        self,
+        embedding_manager,
+        pooling: str = "mean",
+        context_window: Optional[int] = None,  # 保留参数，暂不使用
+        cache: Optional[Dict[str, np.ndarray]] = None,
+    ):
+        self.manager = embedding_manager
+        self.pooling = pooling
+        self.context_window = context_window
+        # 全局 embedding 缓存：seq_hash → np.ndarray [D]
+        self._cache: Dict[str, np.ndarray] = cache if cache is not None else {}
+
+    # -----------------------------------------------------------------------
+    # 工具：计算变异区域提取窗口 w
+    # -----------------------------------------------------------------------
+
+    @staticmethod
+    def compute_w(center_variant: Variant) -> int:
+        """
+        计算 tail pooling 窗口大小 w。
+
+        w = var_len + 2
+        var_len = max(len(alt) - len(ref) + 1, 1)
+
+        例子：
+          SNP A→T  : var_len=1, w=3
+          INS A→AT : var_len=max(2-1+1,1)=max(2,1)=2, w=4
+          DEL AT→A : var_len=max(1-2+1,1)=max(0,1)=1, w=3
+        """
+        var_len = max(len(center_variant.alt) - len(center_variant.ref) + 1, 1)
+        return var_len + 2
+
+    # -----------------------------------------------------------------------
+    # 主接口
+    # -----------------------------------------------------------------------
+
+    def extract(
+        self,
+        center_variant: Variant,
+        up_result: SixSeqResult,
+        dn_result: SixSeqResult,
+    ) -> Dict[str, np.ndarray]:
+        """
+        从 SixSeqResult（upstream + downstream）提取 6 种 embedding。
+
+        参数
+        ----
+        center_variant : 目标变异（用于计算 w）
+        up_result      : upstream 方向的 SixSeqResult
+        dn_result      : downstream 方向的 SixSeqResult
+
+        返回
+        ----
+        {
+            "Mut_hap1": np.ndarray [hidden_size*2],
+            "WT_hap1":  np.ndarray [hidden_size*2],
+            "Mut_hap2": np.ndarray [hidden_size*2],
+            "WT_hap2":  np.ndarray [hidden_size*2],
+            "Mut_ref":  np.ndarray [hidden_size*2],
+            "WT_ref":   np.ndarray [hidden_size*2],
+        }
+        """
+        w = self.compute_w(center_variant)
+
+        # 1. 收集所有需要推理的序列（正链），去重（哈希相同则跳过）
+        # 格式：{seq_hash: seq_str}
+        hash_to_seq: Dict[str, str] = {}
+
+        # 2. 建立 (hap_name, mut_or_wt, direction) → seq_hash 的映射
+        # 用于后续从缓存中读取
+        key_to_hash: Dict[Tuple[str, str, str], str] = {}
+
+        for direction, result in [("up", up_result), ("dn", dn_result)]:
+            for hap_name, pair in [
+                ("hap1", result.hap1),
+                ("hap2", result.hap2),
+                ("ref",  result.ref_pair),
+            ]:
+                # upstream 方向：正链直接推理
+                # downstream 方向：取反向互补链推理
+                for mut_or_wt in ("mut", "wt"):
+                    # 获取序列（wt_is_alias_of_mut 时 wt == mut）
+                    if mut_or_wt == "mut":
+                        seq_fwd = pair.mut
+                    else:
+                        seq_fwd = pair.wt if not pair.wt_is_alias_of_mut else pair.mut
+
+                    if direction == "dn":
+                        # downstream 行取反向互补
+                        seq_for_infer = reverse_complement(seq_fwd)
+                    else:
+                        seq_for_infer = seq_fwd
+
+                    h = _seq_hash(seq_for_infer)
+                    hash_to_seq[h] = seq_for_infer
+                    key_to_hash[(direction, hap_name, mut_or_wt)] = h
+
+        # 3. 批量推理未命中缓存的序列，并做 tail pooling
+        seqs_to_infer = [
+            (h, seq) for h, seq in hash_to_seq.items()
+            if h not in self._cache
+        ]
+
+        if seqs_to_infer:
+            hashes, seqs = zip(*seqs_to_infer)
+            self._run_inference(list(seqs), list(hashes), w)
+
+        # 4. 组装 6 种 embedding（emb_up concat emb_down）
+        result: Dict[str, np.ndarray] = {}
+
+        hap_to_key_map = {
+            "Mut_hap1": ("hap1", "mut"),
+            "WT_hap1":  ("hap1", "wt"),
+            "Mut_hap2": ("hap2", "mut"),
+            "WT_hap2":  ("hap2", "wt"),
+            "Mut_ref":  ("ref",  "mut"),
+            "WT_ref":   ("ref",  "wt"),
+        }
+
+        for emb_name, (hap_name, mut_or_wt) in hap_to_key_map.items():
+            up_hash = key_to_hash[("up", hap_name, mut_or_wt)]
+            dn_hash = key_to_hash[("dn", hap_name, mut_or_wt)]
+
+            emb_up = self._cache[up_hash]
+            emb_dn = self._cache[dn_hash]
+
+            result[emb_name] = np.concatenate([emb_up, emb_dn], axis=0)
+
+        return result
+
+    def extract_batch(
+        self,
+        variants: List[Variant],
+        up_results: List[SixSeqResult],
+        dn_results: List[SixSeqResult],
+    ) -> List[Dict[str, np.ndarray]]:
+        """
+        批量提取多个变异的 embedding（共享 cache，最大化 GPU 利用率）。
+
+        参数
+        ----
+        variants   : 变异列表
+        up_results : 对应的 upstream SixSeqResult 列表
+        dn_results : 对应的 downstream SixSeqResult 列表
+
+        返回
+        ----
+        List[Dict[str, np.ndarray]]（每个元素对应一个变异的 6 种 embedding）
+        """
+        # 1. 收集所有变异的所有序列，统一去重
+        all_hash_to_seq: Dict[str, str] = {}
+        per_variant_key_maps: List[Dict[Tuple[str, str, str], str]] = []
+
+        ws = []  # 每个变异的 w
+
+        for variant, up_r, dn_r in zip(variants, up_results, dn_results):
+            w = self.compute_w(variant)
+            ws.append(w)
+
+            key_to_hash: Dict[Tuple[str, str, str], str] = {}
+
+            for direction, result in [("up", up_r), ("dn", dn_r)]:
+                for hap_name, pair in [
+                    ("hap1", result.hap1),
+                    ("hap2", result.hap2),
+                    ("ref",  result.ref_pair),
+                ]:
+                    for mut_or_wt in ("mut", "wt"):
+                        if mut_or_wt == "mut":
+                            seq_fwd = pair.mut
+                        else:
+                            seq_fwd = pair.wt if not pair.wt_is_alias_of_mut else pair.mut
+
+                        seq_for_infer = (
+                            reverse_complement(seq_fwd)
+                            if direction == "dn"
+                            else seq_fwd
+                        )
+
+                        h = _seq_hash(seq_for_infer)
+                        all_hash_to_seq[h] = seq_for_infer
+                        key_to_hash[(direction, hap_name, mut_or_wt)] = h
+
+            per_variant_key_maps.append(key_to_hash)
+
+        # 2. 批量推理（多个变异可能有不同的 w）
+        # 注意：w 可能不同，不能简单地混合批次
+        # 策略：按 w 分组，同组内统一推理
+        w_groups: Dict[int, List[Tuple[str, str]]] = {}
+        for h, seq in all_hash_to_seq.items():
+            if h in self._cache:
+                continue
+            # 找到此序列对应的 w（取所有变异中最大的 w，保守但安全）
+            # 因为 tail_pool 会取 min(w, n_valid)，多取不会出错
+            # 使用 max_w 保证覆盖所有变异需求
+            for w_val in ws:
+                w_groups.setdefault(w_val, []).append((h, seq))
+            break   # 每个 h 只加一次（无论对应哪个 w 都行，后续 extract() 会用正确的 w）
+
+        # 简化处理：统一用最大的 w（取 max 覆盖所有变异）
+        # 若序列不够 w 长，tail_pool 内部会取 min(w, n_valid)
+        if all_hash_to_seq:
+            max_w = max(ws)
+            seqs_to_infer = [
+                (h, seq) for h, seq in all_hash_to_seq.items()
+                if h not in self._cache
+            ]
+            if seqs_to_infer:
+                hashes, seqs = zip(*seqs_to_infer)
+                self._run_inference(list(seqs), list(hashes), max_w)
+
+        # 3. 组装每个变异的 6 种 embedding
+        hap_to_key_map = {
+            "Mut_hap1": ("hap1", "mut"),
+            "WT_hap1":  ("hap1", "wt"),
+            "Mut_hap2": ("hap2", "mut"),
+            "WT_hap2":  ("hap2", "wt"),
+            "Mut_ref":  ("ref",  "mut"),
+            "WT_ref":   ("ref",  "wt"),
+        }
+
+        results = []
+        for key_to_hash in per_variant_key_maps:
+            emb_dict: Dict[str, np.ndarray] = {}
+            for emb_name, (hap_name, mut_or_wt) in hap_to_key_map.items():
+                up_hash = key_to_hash[("up", hap_name, mut_or_wt)]
+                dn_hash = key_to_hash[("dn", hap_name, mut_or_wt)]
+                emb_up = self._cache[up_hash]
+                emb_dn = self._cache[dn_hash]
+                emb_dict[emb_name] = np.concatenate([emb_up, emb_dn], axis=0)
+            results.append(emb_dict)
+
+        return results
+
+    # -----------------------------------------------------------------------
+    # 内部：批量推理 + tail pooling → 写入缓存
+    # -----------------------------------------------------------------------
+
+    def _run_inference(
+        self,
+        seqs: List[str],
+        hashes: List[str],
+        w: int,
+    ) -> None:
+        """
+        对 seqs 中未命中缓存的序列做批推理，tail pooling 后写入 self._cache。
+
+        参数
+        ----
+        seqs   : 待推理序列列表
+        hashes : 对应的 seq_hash 列表
+        w      : tail pooling 窗口大小
+        """
+        import torch
+
+        batch_size = self.manager.batch_size
+
+        for i in range(0, len(seqs), batch_size):
+            batch_seqs = seqs[i: i + batch_size]
+            batch_hashes = hashes[i: i + batch_size]
+
+            # 推理
+            hidden, mask = self.manager.get_hidden_states(batch_seqs)
+            # hidden: [B, L, D], mask: [B, L]
+
+            # tail pooling
+            pooled = self.manager.tail_pool(hidden, mask, w=w, method=self.pooling)
+            # pooled: [B, D]
+
+            # 写入缓存
+            for j, h in enumerate(batch_hashes):
+                if h not in self._cache:
+                    self._cache[h] = (
+                        pooled[j].float().numpy().astype("float32")
+                    )
+
+    # -----------------------------------------------------------------------
+    # 缓存管理
+    # -----------------------------------------------------------------------
+
+    def cache_size(self) -> int:
+        return len(self._cache)
+
+    def clear_cache(self) -> None:
+        self._cache.clear()

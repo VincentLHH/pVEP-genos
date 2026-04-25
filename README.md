@@ -26,20 +26,25 @@
 
 ```
 VCF ──┐
-      │                                    ┌─ GPU 推理 ──┐
-BED ──┼──▶ SequenceBuilder ──▶ hap_seq ──▶│ EmbeddingManager │──▶ embeddings
-      │    (builtin / genvarloader)       └──────────────┘
+      │                   BedSplit          6 种序列
+BED ──┼──▶ VariantBedSplit ──────▶ SequenceBuilder ──────▶ EmbeddingExtractor ──▶ embeddings
+      │    (upstream / downstream)  (builtin / genvarloader)  (tail pooling + concat)
 Ref ──┘
 ```
 
 **数据流：**
 
-1. **BED** 指定待分析区间（如 GWAS 显著区域）
-2. **VCF** 包含样本的基因型（GT field）和变异信息
-3. **SequenceBuilder** 根据基因型重建区间内的单倍型序列：
+1. **BED** 指定待分析区间（第四列为 `chr_pos_ref_alt`）
+2. **BedSplit** 将每个变异拆为 upstream / downstream 两行，精确定位变异区域
+3. **VCF** 包含样本的基因型（GT field）和变异信息
+4. **SequenceBuilder** 构建 6 种序列（Mut/WT × hap1/hap2/ref）：
    - `builtin`：纯 Python 实现，直接从 FASTA + VCF 读取
    - `genvarloader`：GenVarLoader C 扩展加速，适合超大规模 VCF
-4. **EmbeddingManager** 调用 Genos-1.2B 推理，输出 mean/max/last_token pooling 的 embedding 向量
+5. **EmbeddingExtractor** 对每条序列提取变异区域 embedding：
+   - upstream 正链推理，downstream 反向互补链推理
+   - 仅取末尾 `w = var_len + 2` 个 token 做 tail pooling
+   - concat(emb_up, emb_down) → 最终维度 = hidden_size × 2
+   - 全局哈希缓存，相同序列不重复推理
 
 ---
 
@@ -168,13 +173,15 @@ samtools faidx /path/to/hg38.fa
 
 ### 3. 准备 BED 文件
 
-BED 文件为 0-based、半开区间（符合 UCSC 标准）：
+BED 文件为 0-based、半开区间，**第四列必须填写变异名称**（格式 `chr_pos_ref_alt`，1-based pos）：
 
 ```
-chr1    100000  100200
-chr2    500000  500500
-chrX    2000000 2000300
+chr1    100000  100200  chr1_100100_A_T
+chr2    500000  500500  chr2_500300_AT_A
+chrX    2000000 2000300 chrX_2000150_G_C
 ```
+
+程序默认以 `auto` 模式在内部自动完成 upstream/downstream 拆分（无需手工处理）。若需外部预拆分，第四列应以 `_upstream`/`_downstream` 结尾，并在 `config/default.yaml` 中设置 `bed_split.mode: presplit`。
 
 ### 4. 运行
 
@@ -328,7 +335,10 @@ python run_pipeline.py --config config/default.yaml \
 pytest tests/ -v
 
 # 仅核心逻辑（CPU 节点，跳过 GPU/API 测试）
-pytest tests/test_01_sequence_builder.py -v
+pytest tests/ -v -m "cpu"
+
+# 新版 embedding 逻辑测试（CPU 节点，无需 GPU）
+pytest tests/test_10_new_embedding.py -v
 
 # API 服务测试（需先启动服务）
 pytest tests/test_04_api_service.py -v
@@ -341,9 +351,6 @@ pytest tests/test_06_multi_gpu.py -v
 
 # 交叉验证（CPU 节点，有 genvarloader）：比对 builtin vs genvarloader 序列重建结果
 pytest tests/test_09_cross_validation.py -v
-
-# 仅 mock 数据（排除真实数据抽样）
-pytest tests/test_09_cross_validation.py -v -k "not real"
 ```
 
 > **跳过说明**：部分测试依赖 genvarloader 库或 GPU 节点环境，未安装时自动 skip（非失败）。
@@ -389,26 +396,65 @@ python run_pipeline.py --config config/default.yaml \
 
 ---
 
-## 序列构建器
+## 个性化 VEP Embedding 设计
 
-### builtin（默认）
+### 6 种序列定义
 
-纯 Python 实现，直接从 FASTA 读取参考序列，根据 VCF 中的 GT 将 ALT/REF 等位序列写入 hap_seq。
+对于每一个变异（及对应的样本基因型），构建 6 条序列：
 
-**特点**：无外部依赖，通用性强，适合大多数场景。
+| 简称 | 定义 | 与基因型的关系 |
+|------|------|--------------|
+| `Mut_hap1` | 真实样本单倍型1背景下，目标位点**真实状态**的序列 | 依赖 GT（若 hap1 携带 alt 则含 alt，否则含 ref） |
+| `WT_hap1`  | 真实样本单倍型1背景下，目标位点**强制为 ref** 的序列 | 依赖 GT |
+| `Mut_hap2` | 同上，针对单倍型2 | 依赖 GT |
+| `WT_hap2`  | 同上，针对单倍型2 | 依赖 GT |
+| `Mut_ref`  | 参考基因组背景，目标位点**强制插入 alt** | 跨样本共享 |
+| `WT_ref`   | 纯参考基因组序列 | 跨样本共享 |
 
-**逻辑说明**：
-- 以 BED 区间为中心，取 ±window_size/2 bp 作为窗口序列
-- variant 永远落在窗口正中央（index = window_size/2）
-- GT=1|0：hap1 写入 ALT，hap2 写入 REF
-- GT=0|1：hap1 写入 REF，hap2 写入 ALT
-- GT=1|1：两条 hap 均写入 ALT（纯合 ALT）
-- GT=0|0：两条 hap 均写入 REF（纯合 REF）
-- 负链区域自动做 reverse complement
+**基因型等价规则（省略重复构建）：**
+- `0|0`：`Mut_hap1 == WT_hap1`，`Mut_hap2 == WT_hap2`
+- `1|0`：`Mut_hap1 != WT_hap1`，`Mut_hap2 == WT_hap2`
+- `0|1`：`Mut_hap1 == WT_hap1`，`Mut_hap2 != WT_hap2`
+- `1|1`：`Mut_hap1 != WT_hap1`，`Mut_hap2 != WT_hap2`
 
-### genvarloader
+### BED 拆分规则（upstream / downstream）
 
-调用 GenVarLoader C 扩展加速 VCF 解析和序列重建，内存效率更高，适合百万级变异的大规模 VCF。
+原始 BED 的每个变异行（第四列为 `chr_pos_ref_alt`，1-based）在内部拆分为两行。
+
+设变异的 1-based 起始位置为 `POS`，终止位置 `END = POS + len(ref) - 1`，侧翼扩展长度为 `n`：
+
+| 行类型 | start（0-based） | end（0-based，右开） | 用于推理 |
+|--------|----------|------|---------|
+| `_upstream`   | `POS - n - 1` | `END + 1` | **正链**输入 |
+| `_downstream` | `POS - 2`     | `END + n` | **反向互补链**输入 |
+
+> 两行等长：长度 = `n + var_len_ref + 1`（以 ref 长度计算上游行，alt 长度计算下游行，实际等长由设计保证）
+
+**优势**：变异区域始终在序列末尾附近，取末尾 `w = var_len + 2` 个 token 即可精确捕获变异信号，不受上下文噪音稀释。
+
+### Embedding 提取
+
+1. upstream 正链 → 推理 → 取末尾 `w` 个 token → pooling → `emb_up` [D]
+2. downstream 反向互补 → 推理 → 取末尾 `w` 个 token → pooling → `emb_down` [D]
+3. `concat(emb_up, emb_down)` → 最终 embedding [2D]
+
+**全局哈希缓存**：以序列内容的 xxhash64（或 SHA256）为 key，相同序列不重复推理。
+
+### 序列构建器
+
+#### builtin（默认）
+
+纯 Python 实现：
+- 从 FASTA 直接提取 WT_ref → 注入 alt 得到 Mut_ref
+- 应用除目标变异以外的背景变异（pysam + indel shift 追踪）得到背景序列
+- 根据基因型决定 Mut_hap / WT_hap 关系
+
+#### genvarloader
+
+完全依赖 GenVarLoader 提供真实单倍型（Mut_hap）：
+- genvarloader 处理全部背景 indel 对齐
+- 从 BedRow 第四列名称（`chr_pos_ref_alt_upstream/downstream`）反推变异坐标
+- 根据 upstream/downstream 行设计，从序列末尾/开头 offset 定位并移除目标变异 → 得到 WT_hap
 
 ```bash
 # 安装 genvarloader
@@ -418,8 +464,8 @@ pip install genvarloader
 seq_builder:
   type: genvarloader
   gvl_cache_dir: /path/to/cache    # .gvl 文件缓存目录
-  gvl_strandaware: true
-  gvl_max_mem: 4g                   # gvl.write 内存上限
+  gvl_strandaware: false            # 方向由 EmbeddingExtractor 手动控制
+  gvl_max_mem: 4g
 ```
 
 ---
@@ -432,11 +478,11 @@ seq_builder:
 
 ### Q: embedding 向量维度是多少？
 
-由 Genos-1.2B 模型决定，约为 4096 维（`hidden_size`）。
+新版 pVEP 框架下，每个变异-样本对输出 6 个 embedding 向量，每个向量维度为 `hidden_size × 2`（concat emb_up + emb_down）。Genos-1.2B 的 `hidden_size` 约为 4096，因此每个向量维度约为 **8192**。
 
 ### Q: cache 是什么？有什么用？
 
-embedding cache 以 `(sequence, method)` 为 key 缓存推理结果，相同序列不重复推理。多卡并行时通过共享内存实现跨进程 cache 复用，显著加速含大量重叠区间的分析。
+新版使用基于序列内容哈希（xxhash64/SHA256）的全局 embedding 缓存，以序列字符串为 key，不依赖 `(sequence, method)` 元组。相同序列（无论来自哪个样本、哪种 hap 类型）只推理一次，显著减少重复计算。
 
 ### Q: 如何清空 cache？
 

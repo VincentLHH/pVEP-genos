@@ -2,6 +2,8 @@ import os
 import json
 from typing import List, Dict, Optional
 
+import numpy as np
+
 
 class Sample:
     """
@@ -10,9 +12,20 @@ class Sample:
     参数
     ----
     save_haplotypes : bool
-        是否在 JSON 中保存重建的单倍型序列（可能很大，默认 True）。
+        是否在输出中保存重建的单倍型序列（可能很大，默认 True）。
     save_embeddings : bool
         是否进行推理并保存 embedding（若为 False 则跳过模型推理，默认 True）。
+
+    新版 Embedding 格式
+    -------------------
+    embeddings[variant_id][model_name] = {
+        "Mut_hap1": [float, ...],   # 维度 = hidden_size * 2
+        "WT_hap1":  [float, ...],
+        "Mut_hap2": [float, ...],
+        "WT_hap2":  [float, ...],
+        "Mut_ref":  [float, ...],
+        "WT_ref":   [float, ...],
+    }
     """
 
     def __init__(
@@ -87,7 +100,132 @@ class Sample:
         return any(model_name in emb_dict for emb_dict in self.embeddings.values())
 
     # =========================================================
-    # 🔥 主处理逻辑（真正 batch 推理版本）
+    # 🔥 新版主处理逻辑（基于 EmbeddingExtractor + 6 种序列）
+    # =========================================================
+    def process_all_v2(
+        self,
+        variants: list,
+        sequence_builder,
+        embedding_extractor,
+        n: int = 200,
+        save_interval: int = 50,
+    ):
+        """
+        新版批量处理所有 variant（6 种序列 + tail pooling + concat）。
+
+        步骤
+        ----
+        1. 对每个 variant 构建 VariantBedSplit（BED 拆分）；
+        2. 调用 sequence_builder.build_six_seqs() 构建 6 种序列；
+        3. 调用 embedding_extractor.extract() 提取 6 种 embedding；
+        4. 定期保存。
+
+        参数
+        ----
+        variants          : Variant 列表
+        sequence_builder  : SequenceBuilder 或 GenVarLoaderSequenceBuilder 实例
+        embedding_extractor : EmbeddingExtractor 实例
+        n                 : BED 拆分侧翼长度
+        save_interval     : 每处理多少个 variant 保存一次
+        """
+        from core.variant import split_variant_to_bed, VariantBedSplit
+
+        model_name = embedding_extractor.manager.model_name
+
+        # ── 注入当前样本名（GenVarLoaderSequenceBuilder 需要此信息）──
+        if hasattr(sequence_builder, "current_sample"):
+            sequence_builder.current_sample = self.sample_id
+
+        skipped = 0
+        built = 0
+        count = 0
+
+        print(f"[{self.sample_id}] 🧬 Processing {len(variants)} variants (new v2 pipeline)...")
+
+        for v in variants:
+            vid = v.id
+
+            # 已完整处理过，跳过
+            if self.save_embeddings and self.is_processed(vid, model_name):
+                skipped += 1
+                continue
+
+            # 1. BED 拆分
+            try:
+                bed_split = split_variant_to_bed(v, n=n)
+            except ValueError as e:
+                print(f"[{self.sample_id}] ⚠ BED split failed for {vid}: {e}")
+                continue
+
+            # 2. 构建 6 种序列（兼容 builtin 和 genvarloader 两种 builder）
+            is_gvl = hasattr(sequence_builder, "build_six_seqs") and hasattr(
+                sequence_builder, "vcf_path"
+            )
+
+            if is_gvl:
+                # GenVarLoader 模式
+                six_seqs = sequence_builder.build_six_seqs(
+                    bed_split=bed_split,
+                    center_variant=v,
+                    sample_name=self.sample_id,
+                )
+            else:
+                # builtin 模式
+                six_seqs = sequence_builder.build_six_seqs(
+                    bed_split=bed_split,
+                    center_variant=v,
+                    variants_in_region=variants,  # 传入全量 variants 用于背景过滤
+                )
+
+            if six_seqs is None:
+                print(f"[{self.sample_id}] ⚠ Sequence build failed for {vid}")
+                continue
+
+            built += 1
+
+            # 保存单倍型（若开启）
+            if self.save_haplotypes:
+                self.haplotypes[vid] = self._serialize_six_seqs(six_seqs)
+
+            # 3. 提取 embedding
+            if self.save_embeddings:
+                try:
+                    emb_dict = embedding_extractor.extract(
+                        center_variant=v,
+                        up_result=six_seqs["upstream"],
+                        dn_result=six_seqs["downstream"],
+                    )
+                except Exception as e:
+                    print(f"[{self.sample_id}] ⚠ Embedding extraction failed for {vid}: {e}")
+                    continue
+
+                if vid not in self.embeddings:
+                    self.embeddings[vid] = {}
+
+                # 将 numpy array 转为可 JSON 序列化的 list
+                self.embeddings[vid][model_name] = {
+                    k: v_emb.tolist() for k, v_emb in emb_dict.items()
+                }
+
+            count += 1
+            if count % save_interval == 0:
+                print(f"[{self.sample_id}] 💾 Saving at {count} variants "
+                      f"(cache size: {embedding_extractor.cache_size()})")
+                self.save()
+
+        if skipped:
+            print(f"[{self.sample_id}] ⏭  Skipped {skipped} already-processed variants")
+        print(f"[{self.sample_id}]    Built {built} variant sequences")
+
+        # 恢复 builder 属性（避免跨样本污染）
+        if hasattr(sequence_builder, "current_sample"):
+            sequence_builder.current_sample = None
+
+        self.save()
+        print(f"[{self.sample_id}] ✅ Done")
+
+    # =========================================================
+    # 🔥 旧版主处理逻辑（全序列 pooling，保留兼容）
     # =========================================================
     def process_all(
         self,
@@ -98,6 +236,9 @@ class Sample:
         save_interval: int = 50,
     ):
         """
+        [旧版] 批量处理所有 variant（全序列 pooling）。
+        新代码请使用 process_all_v2()。
+
         批量处理所有 variant：
         1. 先对所有 variant 做序列构建（CPU）；
         2. 将全部待推理序列一次性送入 EmbeddingManager.bulk_get_embeddings（GPU）；
@@ -106,27 +247,17 @@ class Sample:
         GenVarLoader 支持：
         - 底层 builder 注入 current_sample 供 genvarloader 查询样本列；
         - 同一 region 的多个 variant 共享序列（通过 variant_id 区分 key）。
-
-        与旧版逐样本逐 variant 调用 get_embeddings 的区别：
-        - 旧版：每个 variant 各自凑一小批，GPU 利用率低。
-        - 新版：所有 variant 的序列在一次 bulk_get_embeddings 中统一推理，
-          内部自动去重 + 按 batch_size 分块，GPU 吞吐量最大化。
         """
         model_name = embedding_manager.model_name
 
         # ── 注入当前样本名（GenVarLoaderSequenceBuilder 需要此信息）──
-        builder_attr = getattr(sequence_builder, "current_sample", None)
         if hasattr(sequence_builder, "current_sample"):
             sequence_builder.current_sample = self.sample_id
 
         # -------- 阶段 1：构建序列（纯 CPU） --------
         print(f"[{self.sample_id}] 🧬 Building sequences for {len(variants)} variants...")
 
-        # variant_id → seq_data（包含 hap1/hap2 的各种链）
         seq_data_map: Dict[str, Optional[dict]] = {}
-
-        # 扁平化字典：{flat_key: sequence_str}，用于批推理
-        # flat_key 格式："{variant_id}||{hap}_{seq_type}"
         flat_seq_dict: Dict[str, str] = {}
 
         skipped = 0
@@ -135,13 +266,15 @@ class Sample:
         for v in variants:
             vid = v.id
 
-            # 已完整处理过，跳过
             if self.save_embeddings and self.is_processed(vid, model_name):
                 skipped += 1
                 continue
 
-            # build() 会自动使用 sequence_builder.current_sample（若 builder 支持）
-            seq_data = sequence_builder.build(v, variants)
+            import warnings
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", DeprecationWarning)
+                seq_data = sequence_builder.build(v, variants)
+
             if seq_data is None:
                 seq_data_map[vid] = None
                 continue
@@ -149,11 +282,9 @@ class Sample:
             built += 1
             seq_data_map[vid] = seq_data
 
-            # 保存单倍型（若开启）
             if self.save_haplotypes:
                 self.haplotypes[vid] = seq_data
 
-            # 只有需要 embedding 才加入推理队列
             if self.save_embeddings:
                 for hap in ("hap1", "hap2"):
                     if hap not in seq_data:
@@ -187,7 +318,6 @@ class Sample:
                 if vid not in self.embeddings:
                     self.embeddings[vid] = {}
 
-                # 还原 {hap_key: {method: vec}} 结构
                 per_variant_emb: Dict[str, Dict[str, list]] = {}
                 for hap in ("hap1", "hap2"):
                     if hap not in seq_data:
@@ -205,8 +335,35 @@ class Sample:
                     self.save()
 
         # 恢复 builder 属性（避免跨样本污染）
-        if builder_attr is not None or hasattr(sequence_builder, "current_sample"):
-            sequence_builder.current_sample = builder_attr
+        if hasattr(sequence_builder, "current_sample"):
+            sequence_builder.current_sample = None
 
         self.save()
         print(f"[{self.sample_id}] ✅ Done")
+
+    # =========================================================
+    # 序列化辅助
+    # =========================================================
+
+    def _serialize_six_seqs(self, six_seqs: dict) -> dict:
+        """将 SixSeqResult 字典序列化为 JSON 可存储格式。"""
+        result = {}
+        for direction, sr in six_seqs.items():
+            result[direction] = {
+                "hap1": {
+                    "mut": sr.hap1.mut,
+                    "wt":  sr.hap1.wt,
+                    "wt_is_alias": sr.hap1.wt_is_alias_of_mut,
+                },
+                "hap2": {
+                    "mut": sr.hap2.mut,
+                    "wt":  sr.hap2.wt,
+                    "wt_is_alias": sr.hap2.wt_is_alias_of_mut,
+                },
+                "ref": {
+                    "mut": sr.ref_pair.mut,
+                    "wt":  sr.ref_pair.wt,
+                    "wt_is_alias": sr.ref_pair.wt_is_alias_of_mut,
+                },
+            }
+        return result
