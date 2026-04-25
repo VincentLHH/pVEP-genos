@@ -22,7 +22,13 @@ import argparse
 import sys
 import threading
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Dict, List, Optional
+
+# 确保项目根目录在 sys.path 中，使 `python -m api.service` 在任意 CWD 下均可运行
+_PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
 
 import uvicorn
 from fastapi import FastAPI, HTTPException

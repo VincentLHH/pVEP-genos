@@ -17,6 +17,7 @@
 | `test_07_sample_checkpoint.py` | 断点续存 | 任意节点 | mock_fasta | `cpu` |
 | `test_08_cli_flags.py` | CLI 参数解析 | 任意节点 | pytest | `cpu` |
 | `test_09_cross_validation.py` | builtin vs genvarloader 交叉验证 | CPU节点（需genvarloader） | genvarloader | `genvarloader`, `real` |
+| `test_10_new_embedding.py` | 新版个性化 VEP embedding 提取逻辑（BED拆分、序列生成、缓存命中、WT恢复等） | 任意节点（纯CPU） | mock_fasta | `cpu` |
 | `conftest.py` | pytest fixtures、mock数据、环境检测 | — | — | — |
 
 ### 运行环境说明
@@ -24,7 +25,7 @@
 | 环境 | CUDA | 模型文件 | genvarloader | 适用测试 |
 |------|------|----------|--------------|----------|
 | GPU 节点 | ✅ | ✅ | 可能无 | test_03, test_04, test_06 |
-| CPU 节点（无genvarloader） | ❌ | ❌ | ❌ | test_01, test_07, test_08 |
+| CPU 节点（无genvarloader） | ❌ | ❌ | ❌ | test_01, test_07, test_08, test_10 |
 | CPU 节点（有genvarloader） | ❌ | ❌ | ✅ | test_02, test_09 |
 
 ---
@@ -205,6 +206,7 @@ pytest tests/test_05_api_client.py -v
 pytest tests/test_01_sequence_builder.py -v
 pytest tests/test_07_sample_checkpoint.py -v
 pytest tests/test_08_cli_flags.py -v
+pytest tests/test_10_new_embedding.py -v
 ```
 
 ### Step 3: Cross-Validation 测试（需要 genvarloader）
@@ -215,6 +217,13 @@ pytest tests/test_09_cross_validation.py -v
 
 # 仅运行 mock 数据测试（不需要真实数据文件）
 pytest tests/test_09_cross_validation.py -v -k "not real"
+```
+
+### Step 4: 新版 Embedding 逻辑测试
+
+```bash
+# 纯 CPU 测试，无需 GPU 或真实数据
+pytest tests/test_10_new_embedding.py -v
 ```
 
 ---
