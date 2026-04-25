@@ -1,3 +1,20 @@
+"""
+tests/test_embedding_manager.py (旧版)
+========================================
+EmbeddingManager 基础功能测试。
+
+需要 GPU + 模型权重，CPU 环境自动 skip。
+
+运行
+----
+pytest tests/test_embedding_manager.py -v
+"""
+
+import pytest
+from tests.conftest import skip_if_no_cuda_or_model
+
+
+@skip_if_no_cuda_or_model
 def test_embedding_manager_basic():
     from models.embedding_manager import EmbeddingManager
 
@@ -22,3 +39,7 @@ def test_embedding_manager_basic():
     assert result["a"]["mean"] == result["b"]["mean"]
 
     print("✅ EmbeddingManager test passed")
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v", "--tb=short"])

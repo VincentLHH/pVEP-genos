@@ -589,7 +589,13 @@ class GenVarLoaderSequenceBuilder:
                     # 直接取第一个 region 作为 fallback
                     region_idx = 0
             except Exception:
-                pass
+                # regions["name"] 不可用（如 3 列 BED），
+                # 若 dataset 只有一个 region，直接用 region_idx=0
+                if len(self._name_to_idx) == 1:
+                    region_idx = 0
+                elif len(self._name_to_idx) > 1:
+                    # 多 region 但无法按 name 匹配，用第一个 region 的 idx
+                    region_idx = 0
 
         if region_idx is None:
             return None

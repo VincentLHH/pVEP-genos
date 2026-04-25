@@ -311,8 +311,12 @@ class TestSixSeqBuiltin:
         """
         # DEL AT→A at pos=300(1-based), ref=AT(2bp) → end=pos+len-1=301(1-based)
         # upstream 行: start=pos-n-1=296, end=end+1=302(1-based) → 0-based [296,302)
-        # bed_row 区间共 6bp，ref_seq 从 bed_row.start 开始需要 ≥6bp
-        ref_seq = "C" * 296 + "AT" + "C" * 500  # 确保 bed_row 区间 [296,302) 内有 "AT" at idx=3,4
+        # bed_row 区间共 6bp
+        # ref_seq 需要在 0-based offset 299..300 处（即 pos=300 的 1-based 位置）放置 "AT"
+        # 即 ref_seq[299:301] == "AT"
+        # bed_row 区间 [296,302) → fetch 返回 ref_seq[296:302]，其中 offset=300-1-296=3
+        # 所以 ref_seq[296:302] 应该是 "...AT..."，即 ref_seq[299:301]="AT"
+        ref_seq = "C" * 299 + "AT" + "C" * 500
 
         builder = self._make_builder({"chr3": ref_seq})
         bed_row = BedRow(
@@ -326,9 +330,10 @@ class TestSixSeqBuiltin:
         assert result.hap1.wt_is_alias_of_mut is False
         assert result.hap2.wt_is_alias_of_mut is False
         # Mut_hap 应包含 alt（A），WT_hap 应包含 ref（AT）
-        # 在 bed_row.start=290, pos=300, offset=299-290=9
-        assert result.hap1.mut[9] == "A"
-        assert result.hap1.wt[9:11] == "AT"
+        # 在 bed_row.start=296, pos=300, offset=300-1-296=3
+        offset = 300 - 1 - 296
+        assert result.hap1.mut[offset] == "A"
+        assert result.hap1.wt[offset:offset + 2] == "AT"
 
     def test_gt_1_0_only_hap1_different(self, snp_variant):
         """
