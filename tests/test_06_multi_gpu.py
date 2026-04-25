@@ -254,6 +254,7 @@ class TestMultiGPUMinimal:
             pooling=tmp_cfg["embedding"]["pooling"],
             save_interval=tmp_cfg["embedding"]["save_interval"],
             save_haplotypes=True,
+            do_inference=True,
             save_embeddings=True,
         )
 
@@ -308,9 +309,10 @@ class TestMultiGPUGenVarLoader:
             output_dir=temp_output_dir,
             seq_builder_type="genvarloader",
             seq_builder_cfg={"gvl_cache_dir": "/tmp/pVEP_gvl_cache_test"},
-            methods=["mean"],
+            pooling="mean",
             save_interval=10,
             save_haplotypes=True,
+            do_inference=True,
             save_embeddings=True,
         )
 
