@@ -438,7 +438,7 @@ python run_pipeline.py --config config/default.yaml \
 2. downstream 反向互补 → 推理 → 取末尾 `w` 个 token → pooling → `emb_down` [D]
 3. `concat(emb_up, emb_down)` → 最终 embedding [2D]
 
-**全局哈希缓存**：以序列内容的 xxhash64（或 SHA256）为 key，相同序列不重复推理。
+**全局哈希缓存**：以序列内容哈希 + w + pooling 方法为 key（`hash_w{w}_{pooling}`），相同序列在相同参数下不重复推理。不同 w 或 pooling 方法即使序列相同也会产生独立的缓存条目，避免语义不同的 embedding 误命中。
 
 ### 序列构建器
 
@@ -482,7 +482,10 @@ seq_builder:
 
 ### Q: cache 是什么？有什么用？
 
-新版使用基于序列内容哈希（xxhash64/SHA256）的全局 embedding 缓存，以序列字符串为 key，不依赖 `(sequence, method)` 元组。相同序列（无论来自哪个样本、哪种 hap 类型）只推理一次，显著减少重复计算。
+新版使用基于序列内容哈希（xxhash64/SHA256）+ 参数（w, pooling）的全局 embedding 缓存。缓存键格式为 `{seq_hash}_w{w}_{pooling_method}`，确保：
+- 相同序列在相同参数下只推理一次（无论来自哪个样本、哪种 hap 类型）
+- 不同 w（不同变异类型）或不同 pooling 方法不会误命中缓存
+- 显著减少重复计算，尤其在多样本共享同一变异时
 
 ### Q: 如何清空 cache？
 

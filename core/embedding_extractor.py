@@ -26,8 +26,8 @@ core/embedding_extractor.py
 缓存策略
 --------
 全局哈希缓存（内存中）：
-  - 键：序列内容的 xxhash64（若无 xxhash 则回退到 SHA256 前 16 字节）
-  - 值：(emb_up numpy array, w, pooling_method) → 序列级 tail pooled embedding
+  - 键：序列哈希 + w + pooling 方法（确保不同参数下不会误命中）
+  - 值：序列级 tail pooled embedding（np.ndarray）
   - 基因型等价规则保证不重复构建：wt_is_alias_of_mut 时直接复用 mut 的 embedding
 
 使用示例
@@ -68,10 +68,15 @@ from core.sequence_builder import HapSeqPair, SixSeqResult, reverse_complement
 # ===========================================================================
 
 def _seq_hash(seq: str) -> str:
-    """计算序列内容的哈希（作为全局缓存键）。"""
+    """计算序列内容的哈希（作为缓存键的一部分）。"""
     if _HAS_XXHASH:
         return xxhash.xxh64(seq.encode()).hexdigest()
     return hashlib.sha256(seq.encode()).hexdigest()[:16]
+
+
+def _cache_key(seq: str, w: int, pooling: str) -> str:
+    """生成包含序列、窗口大小和 pooling 方法的缓存键。"""
+    return f"{_seq_hash(seq)}_w{w}_{pooling}"
 
 
 # ===========================================================================
@@ -162,13 +167,12 @@ class EmbeddingExtractor:
         """
         w = self.compute_w(center_variant)
 
-        # 1. 收集所有需要推理的序列（正链），去重（哈希相同则跳过）
-        # 格式：{seq_hash: seq_str}
-        hash_to_seq: Dict[str, str] = {}
+        # 1. 收集所有需要推理的序列（正链），去重（缓存键相同则跳过）
+        # 格式：{cache_key: seq_str}
+        key_to_seq: Dict[str, str] = {}
 
-        # 2. 建立 (hap_name, mut_or_wt, direction) → seq_hash 的映射
-        # 用于后续从缓存中读取
-        key_to_hash: Dict[Tuple[str, str, str], str] = {}
+        # 2. 建立 (hap_name, mut_or_wt, direction) → cache_key 的映射
+        key_to_cache: Dict[Tuple[str, str, str], str] = {}
 
         for direction, result in [("up", up_result), ("dn", dn_result)]:
             for hap_name, pair in [
@@ -191,19 +195,19 @@ class EmbeddingExtractor:
                     else:
                         seq_for_infer = seq_fwd
 
-                    h = _seq_hash(seq_for_infer)
-                    hash_to_seq[h] = seq_for_infer
-                    key_to_hash[(direction, hap_name, mut_or_wt)] = h
+                    ck = _cache_key(seq_for_infer, w, self.pooling)
+                    key_to_seq[ck] = seq_for_infer
+                    key_to_cache[(direction, hap_name, mut_or_wt)] = ck
 
         # 3. 批量推理未命中缓存的序列，并做 tail pooling
         seqs_to_infer = [
-            (h, seq) for h, seq in hash_to_seq.items()
-            if h not in self._cache
+            (ck, seq) for ck, seq in key_to_seq.items()
+            if ck not in self._cache
         ]
 
         if seqs_to_infer:
-            hashes, seqs = zip(*seqs_to_infer)
-            self._run_inference(list(seqs), list(hashes), w)
+            cache_keys, seqs = zip(*seqs_to_infer)
+            self._run_inference(list(seqs), list(cache_keys), w)
 
         # 4. 组装 6 种 embedding（emb_up concat emb_down）
         result: Dict[str, np.ndarray] = {}
@@ -218,11 +222,11 @@ class EmbeddingExtractor:
         }
 
         for emb_name, (hap_name, mut_or_wt) in hap_to_key_map.items():
-            up_hash = key_to_hash[("up", hap_name, mut_or_wt)]
-            dn_hash = key_to_hash[("dn", hap_name, mut_or_wt)]
+            up_ck = key_to_cache[("up", hap_name, mut_or_wt)]
+            dn_ck = key_to_cache[("dn", hap_name, mut_or_wt)]
 
-            emb_up = self._cache[up_hash]
-            emb_dn = self._cache[dn_hash]
+            emb_up = self._cache[up_ck]
+            emb_dn = self._cache[dn_ck]
 
             result[emb_name] = np.concatenate([emb_up, emb_dn], axis=0)
 
@@ -247,17 +251,17 @@ class EmbeddingExtractor:
         ----
         List[Dict[str, np.ndarray]]（每个元素对应一个变异的 6 种 embedding）
         """
-        # 1. 收集所有变异的所有序列，统一去重
-        all_hash_to_seq: Dict[str, str] = {}
+        # 1. 收集所有变异的所有序列，按 w 分组去重
+        # cache_key → seq_str，按 w 分组存储
+        per_w_seqs: Dict[int, Dict[str, str]] = {}
         per_variant_key_maps: List[Dict[Tuple[str, str, str], str]] = []
-
-        ws = []  # 每个变异的 w
 
         for variant, up_r, dn_r in zip(variants, up_results, dn_results):
             w = self.compute_w(variant)
-            ws.append(w)
+            if w not in per_w_seqs:
+                per_w_seqs[w] = {}
 
-            key_to_hash: Dict[Tuple[str, str, str], str] = {}
+            key_to_cache: Dict[Tuple[str, str, str], str] = {}
 
             for direction, result in [("up", up_r), ("dn", dn_r)]:
                 for hap_name, pair in [
@@ -277,37 +281,21 @@ class EmbeddingExtractor:
                             else seq_fwd
                         )
 
-                        h = _seq_hash(seq_for_infer)
-                        all_hash_to_seq[h] = seq_for_infer
-                        key_to_hash[(direction, hap_name, mut_or_wt)] = h
+                        ck = _cache_key(seq_for_infer, w, self.pooling)
+                        per_w_seqs[w][ck] = seq_for_infer
+                        key_to_cache[(direction, hap_name, mut_or_wt)] = ck
 
-            per_variant_key_maps.append(key_to_hash)
+            per_variant_key_maps.append(key_to_cache)
 
-        # 2. 批量推理（多个变异可能有不同的 w）
-        # 注意：w 可能不同，不能简单地混合批次
-        # 策略：按 w 分组，同组内统一推理
-        w_groups: Dict[int, List[Tuple[str, str]]] = {}
-        for h, seq in all_hash_to_seq.items():
-            if h in self._cache:
-                continue
-            # 找到此序列对应的 w（取所有变异中最大的 w，保守但安全）
-            # 因为 tail_pool 会取 min(w, n_valid)，多取不会出错
-            # 使用 max_w 保证覆盖所有变异需求
-            for w_val in ws:
-                w_groups.setdefault(w_val, []).append((h, seq))
-            break   # 每个 h 只加一次（无论对应哪个 w 都行，后续 extract() 会用正确的 w）
-
-        # 简化处理：统一用最大的 w（取 max 覆盖所有变异）
-        # 若序列不够 w 长，tail_pool 内部会取 min(w, n_valid)
-        if all_hash_to_seq:
-            max_w = max(ws)
+        # 2. 按 w 分组推理（保证每个 w 使用正确的 pooling 窗口）
+        for w, ck_to_seq in per_w_seqs.items():
             seqs_to_infer = [
-                (h, seq) for h, seq in all_hash_to_seq.items()
-                if h not in self._cache
+                (ck, seq) for ck, seq in ck_to_seq.items()
+                if ck not in self._cache
             ]
             if seqs_to_infer:
-                hashes, seqs = zip(*seqs_to_infer)
-                self._run_inference(list(seqs), list(hashes), max_w)
+                cache_keys, seqs = zip(*seqs_to_infer)
+                self._run_inference(list(seqs), list(cache_keys), w)
 
         # 3. 组装每个变异的 6 种 embedding
         hap_to_key_map = {
@@ -320,13 +308,13 @@ class EmbeddingExtractor:
         }
 
         results = []
-        for key_to_hash in per_variant_key_maps:
+        for key_to_cache in per_variant_key_maps:
             emb_dict: Dict[str, np.ndarray] = {}
             for emb_name, (hap_name, mut_or_wt) in hap_to_key_map.items():
-                up_hash = key_to_hash[("up", hap_name, mut_or_wt)]
-                dn_hash = key_to_hash[("dn", hap_name, mut_or_wt)]
-                emb_up = self._cache[up_hash]
-                emb_dn = self._cache[dn_hash]
+                up_ck = key_to_cache[("up", hap_name, mut_or_wt)]
+                dn_ck = key_to_cache[("dn", hap_name, mut_or_wt)]
+                emb_up = self._cache[up_ck]
+                emb_dn = self._cache[dn_ck]
                 emb_dict[emb_name] = np.concatenate([emb_up, emb_dn], axis=0)
             results.append(emb_dict)
 
@@ -339,7 +327,7 @@ class EmbeddingExtractor:
     def _run_inference(
         self,
         seqs: List[str],
-        hashes: List[str],
+        cache_keys: List[str],
         w: int,
     ) -> None:
         """
@@ -347,9 +335,9 @@ class EmbeddingExtractor:
 
         参数
         ----
-        seqs   : 待推理序列列表
-        hashes : 对应的 seq_hash 列表
-        w      : tail pooling 窗口大小
+        seqs       : 待推理序列列表
+        cache_keys : 对应的缓存键列表（包含序列哈希 + w + pooling）
+        w          : tail pooling 窗口大小
         """
         import torch
 
@@ -357,7 +345,7 @@ class EmbeddingExtractor:
 
         for i in range(0, len(seqs), batch_size):
             batch_seqs = seqs[i: i + batch_size]
-            batch_hashes = hashes[i: i + batch_size]
+            batch_cache_keys = cache_keys[i: i + batch_size]
 
             # 推理
             hidden, mask = self.manager.get_hidden_states(batch_seqs)
@@ -368,9 +356,9 @@ class EmbeddingExtractor:
             # pooled: [B, D]
 
             # 写入缓存
-            for j, h in enumerate(batch_hashes):
-                if h not in self._cache:
-                    self._cache[h] = (
+            for j, ck in enumerate(batch_cache_keys):
+                if ck not in self._cache:
+                    self._cache[ck] = (
                         pooled[j].float().numpy().astype("float32")
                     )
 

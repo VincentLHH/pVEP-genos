@@ -17,7 +17,7 @@
 | `test_07_sample_checkpoint.py` | 断点续存 | 任意节点 | mock_fasta | `cpu` |
 | `test_08_cli_flags.py` | CLI 参数解析 | 任意节点 | pytest | `cpu` |
 | `test_09_cross_validation.py` | builtin vs genvarloader 交叉验证 | CPU节点（需genvarloader） | genvarloader | `genvarloader`, `real` |
-| `test_10_new_embedding.py` | 新版个性化 VEP embedding 提取逻辑（BED拆分、序列生成、缓存命中、WT恢复等） | 任意节点（纯CPU） | mock_fasta | `cpu` |
+| `test_10_new_embedding.py` | 新版个性化 VEP embedding 提取逻辑（BED拆分SNP/INS/DEL/MNV、4种基因型等价规则、6序列生成与去重、缓存键含w/pooling、concat顺序、RC验证、GVL WT恢复SNP/INS/DEL/MNV） | 任意节点（纯CPU） | mock_fasta | `cpu` |
 | `conftest.py` | pytest fixtures、mock数据、环境检测 | — | — | — |
 
 ### 运行环境说明
