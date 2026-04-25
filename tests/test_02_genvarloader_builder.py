@@ -58,8 +58,8 @@ else:
 from core.genvarloader_builder import (
     GenVarLoaderSequenceBuilder,
     _numpy_bytes_to_str,
-    _reverse_complement,
 )
+from core.sequence_builder import _reverse_complement
 from core.variant import Variant
 
 
