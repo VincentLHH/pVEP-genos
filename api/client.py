@@ -173,6 +173,11 @@ class MultiEmbeddingAPIClient:
             return EmbeddingAPIClient(base_url=self._default_url, timeout=300.0)
         raise KeyError(f"No client configured for model: {model_name}")
 
+    def close(self):
+        """关闭所有子客户端连接。"""
+        for client in self._clients.values():
+            client.close()
+
     def get_embeddings(
         self,
         seq_dict: Dict[str, str],
