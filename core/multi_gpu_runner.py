@@ -48,16 +48,18 @@ def _worker(
     output_dir: str,
     seq_builder_type: str,
     seq_builder_cfg: dict,
-    methods: List[str],
+    pooling: str,
     save_interval: int,
     save_haplotypes: bool,
     save_embeddings: bool,
     shared_cache: DictProxy,
+    bed_split_n: int = 200,
 ):
     """
     在单张 GPU 上顺序处理分配给本进程的全部样本。
     """
     import pysam  # 在子进程内导入，避免 fork 问题
+    from core.embedding_extractor import EmbeddingExtractor
 
     print(f"[GPU {rank} / {device}] 🚀 Worker started, {len(sample_names)} samples")
 
@@ -88,6 +90,11 @@ def _worker(
             mode=model_cfg.get("mode", "local"),
         )
 
+        extractor = EmbeddingExtractor(
+            embedding_manager=manager_obj,
+            pooling=pooling,
+        )
+
         # ----- 打开 VCF（每个子进程独立 file handle）-----
         vcf = pysam.VariantFile(vcf_path)
 
@@ -108,11 +115,11 @@ def _worker(
             variants = _load_variants(vcf, regions, sample_name)
             print(f"[GPU {rank}]    🧬 {len(variants)} variants")
 
-            sample.process_all(
+            sample.process_all_v2(
                 variants,
                 builder,
-                manager_obj,
-                methods=methods,
+                extractor,
+                n=bed_split_n,
                 save_interval=save_interval,
             )
 
@@ -178,10 +185,11 @@ def run_multi_gpu(
     output_dir: str,
     seq_builder_type: str,
     seq_builder_cfg: dict,
-    methods: List[str],
+    pooling: str,
     save_interval: int,
     save_haplotypes: bool,
     save_embeddings: bool,
+    bed_split_n: int = 200,
 ):
     """
     将 sample_names 按 round-robin 分配给 devices，
@@ -230,11 +238,12 @@ def run_multi_gpu(
                     output_dir=output_dir,
                     seq_builder_type=seq_builder_type,
                     seq_builder_cfg=seq_builder_cfg,
-                    methods=methods,
+                    pooling=pooling,
                     save_interval=save_interval,
                     save_haplotypes=save_haplotypes,
                     save_embeddings=save_embeddings,
                     shared_cache=shared_cache,
+                    bed_split_n=bed_split_n,
                 ),
                 name=f"worker-{device}",
             )

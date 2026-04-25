@@ -220,7 +220,7 @@ class TestMultiGPUMinimal:
             },
             "window_size": 128,
             "embedding": {
-                "methods": ["mean"],
+                "pooling": "mean",
                 "save_interval": 10,
             },
             "seq_builder": {
@@ -251,7 +251,7 @@ class TestMultiGPUMinimal:
             output_dir=tmp_cfg["output_dir"],
             seq_builder_type="builtin",
             seq_builder_cfg=tmp_cfg.get("seq_builder", {}),
-            methods=tmp_cfg["embedding"]["methods"],
+            pooling=tmp_cfg["embedding"]["pooling"],
             save_interval=tmp_cfg["embedding"]["save_interval"],
             save_haplotypes=True,
             save_embeddings=True,

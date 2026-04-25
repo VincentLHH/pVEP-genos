@@ -40,6 +40,7 @@ from core.sample import Sample
 from core.variant import Variant
 from core.sequence_builder import SequenceBuilder
 from core.genvarloader_builder import GenVarLoaderSequenceBuilder
+from core.embedding_extractor import EmbeddingExtractor
 from models.embedding_manager import EmbeddingManager
 
 
@@ -279,6 +280,17 @@ def run_single(cfg, devices, seq_builder_type, mode, api_base_url, save_haplotyp
     builder = make_builder(cfg, seq_builder_type)
     manager = make_manager(cfg, device, api_base_url)
 
+    embedding_cfg = cfg.get("embedding", {})
+    pooling = embedding_cfg.get("pooling", "mean")
+    n = cfg.get("bed_split", {}).get("n", 200)
+    save_interval = embedding_cfg.get("save_interval", 50)
+
+    extractor = EmbeddingExtractor(
+        embedding_manager=manager,
+        pooling=pooling,
+        context_window=embedding_cfg.get("context_window"),
+    )
+
     for sample_name in tqdm(samples, desc="Samples"):
         sample = Sample(
             sample_name,
@@ -295,12 +307,12 @@ def run_single(cfg, devices, seq_builder_type, mode, api_base_url, save_haplotyp
         variants = load_variants(vcf, regions, sample_name)
         print(f"\n🚀 Processing {sample_name} | {len(variants)} variants")
 
-        sample.process_all(
+        sample.process_all_v2(
             variants,
             builder,
-            manager,
-            methods=cfg["embedding"]["methods"],
-            save_interval=cfg["embedding"]["save_interval"],
+            extractor,
+            n=n,
+            save_interval=save_interval,
         )
 
 
@@ -318,6 +330,10 @@ def run_multi(cfg, devices, seq_builder_type, save_haplotypes, save_embeddings):
 
     regions = load_bed(cfg["bed_path"])
 
+    embedding_cfg = cfg.get("embedding", {})
+    pooling = embedding_cfg.get("pooling", "mean")
+    n = cfg.get("bed_split", {}).get("n", 200)
+
     run_multi_gpu(
         sample_names=samples,
         devices=devices,
@@ -329,10 +345,11 @@ def run_multi(cfg, devices, seq_builder_type, save_haplotypes, save_embeddings):
         output_dir=cfg["output_dir"],
         seq_builder_type=seq_builder_type,
         seq_builder_cfg=cfg.get("seq_builder", {}),
-        methods=cfg["embedding"]["methods"],
-        save_interval=cfg["embedding"]["save_interval"],
+        pooling=pooling,
+        save_interval=embedding_cfg.get("save_interval", 50),
         save_haplotypes=save_haplotypes,
         save_embeddings=save_embeddings,
+        bed_split_n=n,
     )
 
 
