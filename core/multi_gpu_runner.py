@@ -51,10 +51,12 @@ def _worker(
     pooling: str,
     save_interval: int,
     save_haplotypes: bool,
+    do_inference: bool,
     save_embeddings: bool,
     shared_cache: DictProxy,
     bed_split_n: int = 200,
     variant_batch_size: int = 16,
+    filter_hom_ref: bool = True,
 ):
     """
     在单张 GPU 上顺序处理分配给本进程的全部样本。
@@ -107,6 +109,7 @@ def _worker(
                 sample_name,
                 output_dir,
                 save_haplotypes=save_haplotypes,
+                do_inference=do_inference,
                 save_embeddings=save_embeddings,
             )
 
@@ -116,7 +119,7 @@ def _worker(
                 continue
 
             print(f"[GPU {rank}] 📂 Processing {sample_name}")
-            variants = _load_variants(vcf, regions, sample_name)
+            variants = _load_variants(vcf, regions, sample_name, filter_hom_ref=filter_hom_ref)
             print(f"[GPU {rank}]    🧬 {len(variants)} variants")
 
             sample.process_all_v2(
@@ -152,8 +155,9 @@ def _load_bed(bed_path: str) -> List[tuple]:
     return regions
 
 
-def _load_variants(vcf, regions, sample_name):
-    """从 VCF 中提取指定样本在 regions 内的非 ref 变异。"""
+def _load_variants(vcf, regions, sample_name, filter_hom_ref=True):
+    """从 VCF 中提取指定样本在 regions 内的变异。
+    filter_hom_ref: 若为 True，过滤基因型为 0|0 的变异。"""
     from core.variant import Variant
 
     variants = []
@@ -168,7 +172,7 @@ def _load_variants(vcf, regions, sample_name):
 
             if gt is None or None in gt:
                 continue
-            if sum(gt) == 0:
+            if filter_hom_ref and sum(gt) == 0:
                 continue
 
             variants.append(Variant(chrom, rec.pos, ref, alt, gt))
@@ -193,10 +197,12 @@ def run_multi_gpu(
     pooling: str,
     save_interval: int,
     save_haplotypes: bool,
+    do_inference: bool,
     save_embeddings: bool,
     bed_split_n: int = 200,
     use_global_cache: bool = True,
     variant_batch_size: int = 16,
+    filter_hom_ref: bool = True,
 ):
     """
     将 sample_names 按 round-robin 分配给 devices，
@@ -251,10 +257,12 @@ def run_multi_gpu(
                     pooling=pooling,
                     save_interval=save_interval,
                     save_haplotypes=save_haplotypes,
+                    do_inference=do_inference,
                     save_embeddings=save_embeddings,
                     shared_cache=shared_cache if use_global_cache else None,
                     bed_split_n=bed_split_n,
                     variant_batch_size=variant_batch_size,
+                    filter_hom_ref=filter_hom_ref,
                 ),
                 name=f"worker-{device}",
             )

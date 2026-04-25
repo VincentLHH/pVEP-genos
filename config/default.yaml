@@ -29,8 +29,11 @@ bed_split:
   #   "presplit" : 输入 BED 已完成拆分（第四列以 _upstream/_downstream 结尾）
   mode: auto
 
-  # 侧翼扩展长度 n（bp），必须满足 n >= window_size // 2 + max(len(alt), len(ref)) + 2
-  # 程序会在运行时校验此约束
+  # 侧翼扩展长度 n（bp）：
+  #   n 定义了 BED 行中变异位点单侧的侧翼上下文长度。
+  #   上游行长度 = n + len(ref) + 1 bp（n bp 上游 + 变异区域 + 1 bp 下游）
+  #   下游行长度 = n + len(ref) + 1 bp（1 bp 上游 + 变异区域 + n bp 下游）
+  #   必须满足 n >= window_size // 2 + max(len(alt), len(ref)) + 2
   n: 200
 
 # -------------------------------------------------------
@@ -40,6 +43,9 @@ model:
   name: Genos-1.2B
   path: /home/share/huadjyin/home/liuhaohan/genos/Genos-1.2B
   dtype: bfloat16
+
+  # GPU 推理批次大小（每次前向传播处理的序列条数）
+  # 增大可提升 GPU 利用率，但需更多显存
   batch_size: 32
 
   # ── 推理模式 ──
@@ -55,6 +61,9 @@ model:
   devices: []
   device: cuda
 
+# 每个方向（upstream/downstream）送入模型的序列长度（bp）
+# 决定了模型推理时能看到的上下文范围，需与 n 配合：
+#   n >= window_size // 2 + max(len(alt), len(ref)) + 2
 window_size: 128
 
 # -------------------------------------------------------
@@ -76,8 +85,18 @@ embedding:
   # 是否在输出中保存重建的单倍型序列（可能较大）
   save_haplotypes: true
 
-  # 是否进行推理并保存 embedding
+  # 是否执行模型推理（false 时仅构建序列，不运行模型，不产生 embedding）
+  do_inference: true
+
+  # 是否将 embedding 结果保存到磁盘
+  # 注意：do_inference=false 时此选项无效（无结果可保存）
+  # 若只需在内存中使用 embedding（如直接传入下游训练），可设为 false
   save_embeddings: true
+
+  # 是否过滤基因型为 0|0 的变异
+  #   true  : 过滤 0|0（默认，减少计算量，但不同样本变异数可能不同）
+  #   false : 保留 0|0（确保所有样本变异数一致，便于下游训练对齐）
+  filter_hom_ref: true
 
   # 全局 embedding 缓存策略：
   #   true  : 开启全局缓存（相同序列跨样本/跨变异共享，节省重复推理）
@@ -86,5 +105,6 @@ embedding:
   use_global_cache: true
 
   # 跨变异批量推理的积累大小（每次积累多少个 variant 的序列后统一推理）
-  # 增大此值可提高 GPU 利用率，但需更多显存
+  # 配合 model.batch_size 使用：variant_batch_size=16 且每个 variant 约 8 条唯一序列
+  # → 每次推理约 128 条序列，可充分利用 batch_size=32 的 GPU 并行能力
   variant_batch_size: 16

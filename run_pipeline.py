@@ -7,7 +7,8 @@ pVEP-genos 主入口。
 ----
 1. 真正的 batch 推理（sample.process_all 内部统一收集序列再批推理）。
 2. --save-haplotypes / --no-save-haplotypes  控制是否保存单倍型序列。
-   --save-embeddings  / --no-save-embeddings 控制是否进行推理保存 embedding。
+   --do-inference / --no-inference  控制是否执行模型推理。
+   --save-embeddings  / --no-save-embeddings 控制是否保存 embedding 到磁盘。
 3. 多卡推理：--devices cuda:0 cuda:1 ...
    各 GPU 独占一个子进程，全局 cache 跨进程共享（Manager.dict）。
 4. API 推理模式：--mode api --api-base-url http://gpu-node:8000
@@ -24,6 +25,9 @@ python run_pipeline.py --config config/default.yaml \
     --no-save-haplotypes
 
 # 只构建序列，不推理（debug）
+python run_pipeline.py --config config/default.yaml --no-inference
+
+# 推理但不保存到磁盘（内存中使用，如下游训练）
 python run_pipeline.py --config config/default.yaml --no-save-embeddings
 
 # API 模式（无 GPU 节点，调用远程服务）
@@ -101,17 +105,44 @@ def parse_args():
         help="不保存单倍型序列",
     )
     parser.add_argument(
+        "--do-inference",
+        dest="do_inference",
+        action="store_true",
+        default=None,
+        help="执行模型推理（默认由 config 决定）",
+    )
+    parser.add_argument(
+        "--no-inference",
+        dest="do_inference",
+        action="store_false",
+        help="不执行模型推理，仅构建序列",
+    )
+    parser.add_argument(
         "--save-embeddings",
         dest="save_embeddings",
         action="store_true",
         default=None,
-        help="进行推理并保存 embedding（默认由 config 决定）",
+        help="将 embedding 保存到磁盘（默认由 config 决定）",
     )
     parser.add_argument(
         "--no-save-embeddings",
         dest="save_embeddings",
         action="store_false",
-        help="跳过推理，不保存 embedding",
+        help="不保存 embedding 到磁盘（仍在内存中计算）",
+    )
+
+    parser.add_argument(
+        "--filter-hom-ref",
+        dest="filter_hom_ref",
+        action="store_true",
+        default=None,
+        help="过滤基因型为 0|0 的变异（默认由 config 决定）",
+    )
+    parser.add_argument(
+        "--keep-hom-ref",
+        dest="filter_hom_ref",
+        action="store_false",
+        help="保留 0|0 变异（确保所有样本变异数一致）",
     )
 
     return parser.parse_args()
@@ -142,7 +173,15 @@ def load_bed(bed_path):
 # =========================
 # 🔹 VCF → Variant
 # =========================
-def load_variants(vcf, regions, sample_name):
+def load_variants(vcf, regions, sample_name, filter_hom_ref=True):
+    """
+    从 VCF 中提取指定样本在 regions 内的变异。
+
+    参数
+    ----
+    filter_hom_ref : 若为 True，过滤基因型为 0|0 的变异；
+                     若为 False，保留 0|0 变异（确保所有样本变异数一致）。
+    """
     variants = []
     for chrom, start, end in regions:
         for rec in vcf.fetch(chrom, start, end):
@@ -155,7 +194,7 @@ def load_variants(vcf, regions, sample_name):
 
             if gt is None or None in gt:
                 continue
-            if sum(gt) == 0:
+            if filter_hom_ref and sum(gt) == 0:
                 continue
 
             variants.append(Variant(chrom, rec.pos, ref, alt, gt))
@@ -185,7 +224,7 @@ def resolve_api_base_url(args, cfg, mode: str) -> str:
 
 
 def resolve_flags(args, cfg):
-    """统一解析 save_haplotypes / save_embeddings，优先 CLI > embedding > output（兼容旧版）"""
+    """统一解析保存/推理标志，优先 CLI > embedding > output（兼容旧版）"""
     emb_cfg = cfg.get("embedding", {})
     out_cfg = cfg.get("output", {})
 
@@ -194,12 +233,27 @@ def resolve_flags(args, cfg):
         if args.save_haplotypes is not None
         else emb_cfg.get("save_haplotypes", out_cfg.get("save_haplotypes", True))
     )
+    do_inference = (
+        args.do_inference
+        if args.do_inference is not None
+        else emb_cfg.get("do_inference", True)
+    )
     save_embeddings = (
         args.save_embeddings
         if args.save_embeddings is not None
         else emb_cfg.get("save_embeddings", out_cfg.get("save_embeddings", True))
     )
-    return save_haplotypes, save_embeddings
+    # 不推理则不可能保存 embedding
+    if not do_inference:
+        save_embeddings = False
+    return save_haplotypes, do_inference, save_embeddings
+
+
+def resolve_filter_hom_ref(args, cfg) -> bool:
+    """解析是否过滤 0|0 变异，优先 CLI > config > 默认 True。"""
+    if args.filter_hom_ref is not None:
+        return args.filter_hom_ref
+    return cfg.get("embedding", {}).get("filter_hom_ref", True)
 
 
 def resolve_seq_builder_type(args, cfg) -> str:
@@ -271,7 +325,7 @@ def make_manager(cfg, device: str, api_base_url: str = ""):
 # =========================
 # 🔹 单卡主流程（local 或 api 模式共用）
 # =========================
-def run_single(cfg, devices, seq_builder_type, mode, api_base_url, save_haplotypes, save_embeddings):
+def run_single(cfg, devices, seq_builder_type, mode, api_base_url, save_haplotypes, do_inference, save_embeddings, filter_hom_ref=True):
     device = devices[0]
     mode_label = "API" if mode == "api" else f"Single-GPU on {device}"
     print(f"▶️  Mode: {mode_label}")
@@ -305,6 +359,7 @@ def run_single(cfg, devices, seq_builder_type, mode, api_base_url, save_haplotyp
             sample_name,
             cfg["output_dir"],
             save_haplotypes=save_haplotypes,
+            do_inference=do_inference,
             save_embeddings=save_embeddings,
         )
 
@@ -313,23 +368,49 @@ def run_single(cfg, devices, seq_builder_type, mode, api_base_url, save_haplotyp
             print(f"\n🚀 [{sample_name}] ⏭  完整结果已存在，跳过")
             continue
 
-        variants = load_variants(vcf, regions, sample_name)
+        variants = load_variants(vcf, regions, sample_name, filter_hom_ref=filter_hom_ref)
         print(f"\n🚀 Processing {sample_name} | {len(variants)} variants")
 
-        sample.process_all_v2(
-            variants,
-            builder,
-            extractor,
-            n=n,
-            save_interval=save_interval,
-            variant_batch_size=variant_batch_size,
-        )
+        # 不推理时跳过模型相关操作
+        if do_inference:
+            sample.process_all_v2(
+                variants,
+                builder,
+                extractor,
+                n=n,
+                save_interval=save_interval,
+                variant_batch_size=variant_batch_size,
+            )
+        else:
+            # 仅构建序列，不推理
+            from core.variant import split_variant_to_bed
+            count = 0
+            for v in variants:
+                vid = v.id
+                try:
+                    bed_split = split_variant_to_bed(v, n=n)
+                except ValueError:
+                    continue
+                is_gvl = hasattr(builder, "build_six_seqs") and hasattr(builder, "vcf_path")
+                if is_gvl:
+                    six_seqs = builder.build_six_seqs(
+                        bed_split=bed_split, center_variant=v, sample_name=sample_name)
+                else:
+                    six_seqs = builder.build_six_seqs(
+                        bed_split=bed_split, center_variant=v, variants_in_region=variants)
+                if six_seqs is None:
+                    continue
+                count += 1
+                if sample.save_haplotypes:
+                    sample.haplotypes[vid] = sample._serialize_six_seqs(six_seqs)
+            print(f"[{sample_name}] Built {count} variant sequences (no inference)")
+            sample.save()
 
 
 # =========================
 # 🔹 多卡主流程（仅 local 模式）
 # =========================
-def run_multi(cfg, devices, seq_builder_type, save_haplotypes, save_embeddings):
+def run_multi(cfg, devices, seq_builder_type, save_haplotypes, do_inference, save_embeddings, filter_hom_ref=True):
     from core.multi_gpu_runner import run_multi_gpu
 
     print(f"▶️  Multi-GPU mode on {devices}")
@@ -360,10 +441,12 @@ def run_multi(cfg, devices, seq_builder_type, save_haplotypes, save_embeddings):
         pooling=pooling,
         save_interval=embedding_cfg.get("save_interval", 50),
         save_haplotypes=save_haplotypes,
+        do_inference=do_inference,
         save_embeddings=save_embeddings,
         bed_split_n=n,
         use_global_cache=use_global_cache,
         variant_batch_size=variant_batch_size,
+        filter_hom_ref=filter_hom_ref,
     )
 
 
@@ -377,7 +460,8 @@ def main():
     seq_builder_type = resolve_seq_builder_type(args, cfg)
     mode = resolve_mode(args, cfg)
     api_base_url = resolve_api_base_url(args, cfg, mode)
-    save_haplotypes, save_embeddings = resolve_flags(args, cfg)
+    save_haplotypes, do_inference, save_embeddings = resolve_flags(args, cfg)
+    filter_hom_ref = resolve_filter_hom_ref(args, cfg)
     devices = resolve_devices(args, cfg)
 
     print("📋 Config:")
@@ -388,15 +472,17 @@ def main():
     else:
         print(f"   devices          = {devices}")
     print(f"   save_haplotypes  = {save_haplotypes}")
+    print(f"   do_inference     = {do_inference}")
     print(f"   save_embeddings  = {save_embeddings}")
+    print(f"   filter_hom_ref   = {filter_hom_ref}")
 
     # API 模式走单卡路径（推理在远端）
     if mode == "api":
-        run_single(cfg, ["cpu"], seq_builder_type, mode, api_base_url, save_haplotypes, save_embeddings)
+        run_single(cfg, ["cpu"], seq_builder_type, mode, api_base_url, save_haplotypes, do_inference, save_embeddings, filter_hom_ref)
     elif len(devices) > 1:
-        run_multi(cfg, devices, seq_builder_type, save_haplotypes, save_embeddings)
+        run_multi(cfg, devices, seq_builder_type, save_haplotypes, do_inference, save_embeddings, filter_hom_ref)
     else:
-        run_single(cfg, devices, seq_builder_type, mode, api_base_url, save_haplotypes, save_embeddings)
+        run_single(cfg, devices, seq_builder_type, mode, api_base_url, save_haplotypes, do_inference, save_embeddings, filter_hom_ref)
 
 
 if __name__ == "__main__":

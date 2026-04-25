@@ -13,8 +13,11 @@ class Sample:
     ----
     save_haplotypes : bool
         是否在输出中保存重建的单倍型序列（可能很大，默认 True）。
+    do_inference : bool
+        是否执行模型推理（若为 False 则跳过模型推理，默认 True）。
     save_embeddings : bool
-        是否进行推理并保存 embedding（若为 False 则跳过模型推理，默认 True）。
+        是否将 embedding 保存到磁盘（若为 False 则不保存到文件，默认 True）。
+        do_inference=False 时此参数无效。
 
     新版 Embedding 格式
     -------------------
@@ -33,11 +36,13 @@ class Sample:
         sample_id: str,
         output_dir: str,
         save_haplotypes: bool = True,
+        do_inference: bool = True,
         save_embeddings: bool = True,
     ):
         self.sample_id = sample_id
         self.output_dir = output_dir
         self.save_haplotypes = save_haplotypes
+        self.do_inference = do_inference
         self.save_embeddings = save_embeddings
 
         self.haplotypes: Dict = {}
@@ -75,7 +80,7 @@ class Sample:
     # 判断是否已处理
     # =========================================================
     def is_processed(self, variant_id: str, model_name: str) -> bool:
-        if not self.save_embeddings:
+        if not self.do_inference or not self.save_embeddings:
             return False
         return (
             variant_id in self.embeddings
@@ -90,7 +95,7 @@ class Sample:
         - 至少有一个 variant 的 embedding 存在（确保不是空文件）
         只有在满足上述条件时，才认为该样本"完整"，可直接跳过整个处理流程。
         """
-        if not self.save_embeddings:
+        if not self.do_inference or not self.save_embeddings:
             return False
         if not os.path.exists(self.filepath):
             return False
@@ -200,7 +205,7 @@ class Sample:
             vid = v.id
 
             # 已完整处理过，跳过
-            if self.save_embeddings and self.is_processed(vid, model_name):
+            if self.do_inference and self.save_embeddings and self.is_processed(vid, model_name):
                 skipped += 1
                 continue
 
@@ -240,7 +245,7 @@ class Sample:
                 self.haplotypes[vid] = self._serialize_six_seqs(six_seqs)
 
             # 3. 积累到批量缓冲
-            if self.save_embeddings:
+            if self.do_inference:
                 batch_variants.append(v)
                 batch_up_results.append(six_seqs["upstream"])
                 batch_dn_results.append(six_seqs["downstream"])

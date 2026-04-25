@@ -139,29 +139,36 @@ seq_builder:
   gvl_cache_dir: ""      # .gvl 缓存目录，不填默认 /tmp/gvl_cache
   gvl_strandaware: true  # 负链区域是否 reverse complement
 
+# BED 拆分参数
+bed_split:
+  mode: auto             # auto: 程序内部拆分；presplit: 外部已拆分
+  n: 200                 # 侧翼扩展长度（bp），需 >= window_size//2 + max(len(alt),len(ref)) + 2
+
 # 模型配置
 model:
   name: Genos-1.2B
   path: /path/to/Genos-1.2B     # 模型权重目录
   dtype: bfloat16
-  batch_size: 32
+  batch_size: 32                # GPU 推理批次大小（每次前向传播的序列条数）
   mode: local                  # local: 本机推理；api: 调用远程服务
   api_base_url: ""             # mode=api 时填写
   devices: []                  # 多卡列表，如 [cuda:0, cuda:1]
   device: cuda                 # 单卡默认设备
 
-# 窗口大小（单位 bp）
+# 每个方向送入模型的序列长度（bp）
+# 需与 n 配合：n >= window_size // 2 + max(len(alt), len(ref)) + 2
 window_size: 128
 
-# Embedding 方法
+# Embedding 提取配置
 embedding:
-  methods: ["mean"]            # 支持 mean / max / last_token
-  save_interval: 50            # 每处理 N 个样本写入一次磁盘
-
-# 输出控制
-output:
-  save_haplotypes: true        # 是否保存重建后的单倍型序列
-  save_embeddings: true        # 是否保存 embedding
+  pooling: mean              # Tail pooling 方法：mean 或 max
+  save_interval: 50          # 每处理 N 个 variant 写入一次磁盘
+  save_haplotypes: true      # 是否保存重建后的单倍型序列
+  do_inference: true         # 是否执行模型推理（false 时仅构建序列）
+  save_embeddings: true      # 是否将 embedding 保存到磁盘（do_inference=false 时无效）
+  filter_hom_ref: true       # 是否过滤 0|0 变异（false 时所有样本变异数一致）
+  use_global_cache: true     # 全局缓存开关
+  variant_batch_size: 16     # 跨变异批量推理积累大小
 ```
 
 ### 2. 准备参考基因组索引
@@ -246,6 +253,53 @@ curl -X POST http://localhost:8000/embed \
 
 ## 配置说明
 
+### 核心参数详解
+
+| 参数 | 位置 | 类型 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| `n` | `bed_split.n` | int | 200 | BED 拆分侧翼扩展长度（bp）。定义变异位点单侧的上下文范围。上游行 = n bp上游 + 变异区域 + 1 bp下游；下游行 = 1 bp上游 + 变异区域 + n bp下游。需满足 `n >= window_size // 2 + max(len(alt), len(ref)) + 2` |
+| `window_size` | 顶层 | int | 128 | 每个方向（upstream/downstream）送入模型的序列长度（bp）。决定了模型推理时能看到的上下文范围。需与 `n` 配合，确保 BED 行长度足以覆盖 |
+| `batch_size` | `model.batch_size` | int | 32 | GPU 推理批次大小，即每次前向传播处理的序列条数。增大可提升 GPU 利用率，但需更多显存。与 `variant_batch_size` 独立 |
+| `variant_batch_size` | `embedding.variant_batch_size` | int | 16 | 跨变异批量推理的积累大小。每积累 N 个 variant 的序列后统一送入 GPU 推理。配合 `batch_size` 使用：`variant_batch_size` × 每个variant约8条唯一序列 ≈ 总序列数，需 ≥ `batch_size` 才能充分利用 GPU |
+| `do_inference` | `embedding.do_inference` | bool | true | 是否执行模型推理。`false` 时仅构建序列，不运行模型、不产生 embedding。适用于调试序列构建或只保存单倍型 |
+| `save_embeddings` | `embedding.save_embeddings` | bool | true | 是否将 embedding 结果保存到磁盘。`do_inference=false` 时此参数无效。设为 `false` 可仅在内存中使用 embedding（如直接传入下游训练） |
+| `filter_hom_ref` | `embedding.filter_hom_ref` | bool | true | 是否过滤基因型为 0\|0 的变异。`true` 减少计算量但不同样本变异数可能不同；`false` 保留 0\|0 确保所有样本变异数一致 |
+| `save_haplotypes` | `embedding.save_haplotypes` | bool | true | 是否在输出中保存重建的单倍型序列 |
+
+#### n 与 window_size 的关系
+
+```
+BED 行长度 = n + len(ref) + 1 bp
+
+n 决定了 BED 行多长（即序列构建时提取多少上下文）
+window_size 决定了推理时模型看到多少上下文
+
+约束：n >= window_size // 2 + max(len(alt), len(ref)) + 2
+      （确保 BED 行长度 >= window_size）
+
+典型配置：
+  window_size=128, n=200 → BED 行 ~202 bp → 模型看 202 bp
+  window_size=256, n=400 → BED 行 ~402 bp → 模型看 402 bp
+```
+
+#### batch_size 与 variant_batch_size 的关系
+
+```
+batch_size（model.batch_size）：
+  每次 GPU 前向传播处理的序列条数。控制 GPU 单次推理的并行度。
+
+variant_batch_size（embedding.variant_batch_size）：
+  每积累多少个 variant 后统一推理。控制 CPU/GPU 之间的流水线深度。
+
+协作方式：
+  1 个 variant → 约 8 条唯一序列（6种序列，部分因基因型等价去重）
+  variant_batch_size=16 → 约 128 条序列积累后统一推理
+  batch_size=32 → 128 条序列分 4 批送入 GPU
+
+  若 variant_batch_size 过小（如 1），每次仅 ~8 条序列送入 GPU，
+  batch_size=32 的大部分槽位空闲，GPU 利用率低。
+```
+
 ### 环境变量（可选）
 
 | 变量 | 覆盖范围 |
@@ -263,12 +317,23 @@ curl -X POST http://localhost:8000/embed \
 所有 config 中的参数都可通过命令行覆盖（覆盖优先级：CLI > 环境变量 > 配置文件）：
 
 ```bash
+# 常用命令行参数
 python run_pipeline.py --config config/default.yaml \
     --mode api \
     --api-base-url http://192.168.1.100:8000 \
     --devices cuda:0 cuda:1 \
-    --no-save-haplotypes
+    --no-save-haplotypes \
+    --no-inference \          # 仅构建序列，不推理
+    --no-save-embeddings \    # 推理但不保存到磁盘
+    --keep-hom-ref            # 保留 0|0 变异
 ```
+
+| CLI 参数 | 等价配置 | 说明 |
+|----------|----------|------|
+| `--do-inference` / `--no-inference` | `embedding.do_inference` | 是否执行推理 |
+| `--save-embeddings` / `--no-save-embeddings` | `embedding.save_embeddings` | 是否保存 embedding 到磁盘 |
+| `--save-haplotypes` / `--no-save-haplotypes` | `embedding.save_haplotypes` | 是否保存单倍型序列 |
+| `--filter-hom-ref` / `--keep-hom-ref` | `embedding.filter_hom_ref` | 是否过滤 0\|0 变异 |
 
 ---
 

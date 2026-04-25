@@ -324,8 +324,9 @@ class TestResolveFunctions:
         cfg = load_config(minimal_config)
         sys.argv = orig
 
-        h, e = resolve_flags(args, cfg)
+        h, inf, e = resolve_flags(args, cfg)
         assert h is True
+        assert inf is True
         assert e is True
 
     def test_resolve_seq_builder_type(self, minimal_config):
