@@ -289,7 +289,8 @@ class TestSixSeqBuiltin:
         """
         0|0 基因型：Mut_hap1 == WT_hap1，Mut_hap2 == WT_hap2。
         """
-        ref_seq = "G" * 200
+        # ref_seq 必须足够长（>= bed_row.end=508），mock fetch 才能正确返回区间序列
+        ref_seq = "G" * 600
 
         builder = self._make_builder({"chr5": ref_seq})
         bed_row = BedRow(
@@ -308,12 +309,14 @@ class TestSixSeqBuiltin:
         """
         1|1 基因型：两条 hap 都携带 alt，Mut != WT（对于 hap1 和 hap2）。
         """
-        # DEL AT→A at pos=300，构造一个包含 AT 的参考序列
-        ref_seq = "C" * 298 + "AT" + "C" * 400  # pos=300 → 0-based idx=299 → AT 在 299,300
+        # DEL AT→A at pos=300(1-based), ref=AT(2bp) → end=pos+len-1=301(1-based)
+        # upstream 行: start=pos-n-1=296, end=end+1=302(1-based) → 0-based [296,302)
+        # bed_row 区间共 6bp，ref_seq 从 bed_row.start 开始需要 ≥6bp
+        ref_seq = "C" * 296 + "AT" + "C" * 500  # 确保 bed_row 区间 [296,302) 内有 "AT" at idx=3,4
 
         builder = self._make_builder({"chr3": ref_seq})
         bed_row = BedRow(
-            chrom="chr3", start=290, end=306, name="chr3_300_AT_A_upstream"
+            chrom="chr3", start=296, end=302, name="chr3_300_AT_A_upstream"
         )
 
         result = builder.build_from_bed(bed_row, del_variant, [del_variant])

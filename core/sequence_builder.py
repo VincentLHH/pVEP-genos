@@ -459,6 +459,10 @@ class SequenceBuilder:
             + bg_seq[center_offset + len(center_variant.ref):]
         )
 
+    def reverse_complement(self, seq: str) -> str:
+        """返回序列的反向互补（实例方法，与旧版 API 兼容）。"""
+        return reverse_complement(seq)
+
     # -----------------------------------------------------------------------
     # 旧版接口（已废弃，保留兼容）
     # -----------------------------------------------------------------------

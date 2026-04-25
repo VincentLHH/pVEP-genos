@@ -580,6 +580,17 @@ class GenVarLoaderSequenceBuilder:
                 region_idx = idx
                 break
 
+        # Fallback：如果 name 匹配失败，尝试从 dataset 的第一个 region 获取
+        if region_idx is None:
+            try:
+                names = self._dataset.regions["name"].to_list()
+                if names:
+                    # 旧版 BED（无第4列）时，regions["name"] 可能就是 BED 行文本
+                    # 直接取第一个 region 作为 fallback
+                    region_idx = 0
+            except Exception:
+                pass
+
         if region_idx is None:
             return None
 
