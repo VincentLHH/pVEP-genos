@@ -46,7 +46,6 @@ from core.variant import (
     Variant,
     VariantBedSplit,
     parse_var_name_from_bed_name,
-    reverse_complement as _rc_from_variant_module,
 )
 from core.sequence_builder import (
     HapSeqPair,
