@@ -109,6 +109,7 @@ class Sample:
         embedding_extractor,
         n: int = 200,
         save_interval: int = 50,
+        variant_batch_size: int = 16,
     ):
         """
         新版批量处理所有 variant（6 种序列 + tail pooling + concat）。
@@ -117,16 +118,18 @@ class Sample:
         ----
         1. 对每个 variant 构建 VariantBedSplit（BED 拆分）；
         2. 调用 sequence_builder.build_six_seqs() 构建 6 种序列；
-        3. 调用 embedding_extractor.extract() 提取 6 种 embedding；
+        3. 积累 variant_batch_size 个 variant 后，调用
+           embedding_extractor.extract_batch() 统一推理（提高 GPU 利用率）；
         4. 定期保存。
 
         参数
         ----
-        variants          : Variant 列表
-        sequence_builder  : SequenceBuilder 或 GenVarLoaderSequenceBuilder 实例
+        variants            : Variant 列表
+        sequence_builder    : SequenceBuilder 或 GenVarLoaderSequenceBuilder 实例
         embedding_extractor : EmbeddingExtractor 实例
-        n                 : BED 拆分侧翼长度
-        save_interval     : 每处理多少个 variant 保存一次
+        n                   : BED 拆分侧翼长度
+        save_interval       : 每处理多少个 variant 保存一次
+        variant_batch_size  : 跨变异批量推理的积累大小（增大可提高 GPU 利用率）
         """
         from core.variant import split_variant_to_bed, VariantBedSplit
 
@@ -140,7 +143,58 @@ class Sample:
         built = 0
         count = 0
 
-        print(f"[{self.sample_id}] 🧬 Processing {len(variants)} variants (new v2 pipeline)...")
+        print(f"[{self.sample_id}] 🧬 Processing {len(variants)} variants "
+              f"(v2 pipeline, batch={variant_batch_size})...")
+
+        # ── 批量积累缓冲 ──
+        batch_variants: list = []
+        batch_up_results: list = []
+        batch_dn_results: list = []
+        batch_meta: list = []  # [(vid, six_seqs), ...] 用于保存
+
+        def flush_batch():
+            """将积累的 variant 一起推理并保存结果。"""
+            nonlocal count
+            if not batch_variants:
+                return
+            try:
+                emb_results = embedding_extractor.extract_batch(
+                    variants=batch_variants,
+                    up_results=batch_up_results,
+                    dn_results=batch_dn_results,
+                )
+            except Exception as e:
+                print(f"[{self.sample_id}] ⚠ Batch embedding extraction failed: {e}")
+                # 回退：逐个提取
+                emb_results = []
+                for v, up_r, dn_r in zip(batch_variants, batch_up_results, batch_dn_results):
+                    try:
+                        emb_results.append(embedding_extractor.extract(v, up_r, dn_r))
+                    except Exception:
+                        emb_results.append(None)
+
+            for i, (vid, six_seqs) in enumerate(batch_meta):
+                emb_dict = emb_results[i] if i < len(emb_results) else None
+                if emb_dict is None:
+                    continue
+
+                if vid not in self.embeddings:
+                    self.embeddings[vid] = {}
+                self.embeddings[vid][model_name] = {
+                    k: v_emb.tolist() for k, v_emb in emb_dict.items()
+                }
+
+                count += 1
+                if count % save_interval == 0:
+                    print(f"[{self.sample_id}] 💾 Saving at {count} variants "
+                          f"(cache size: {embedding_extractor.cache_size()})")
+                    self.save()
+
+            # 清空缓冲
+            batch_variants.clear()
+            batch_up_results.clear()
+            batch_dn_results.clear()
+            batch_meta.clear()
 
         for v in variants:
             vid = v.id
@@ -163,18 +217,16 @@ class Sample:
             )
 
             if is_gvl:
-                # GenVarLoader 模式
                 six_seqs = sequence_builder.build_six_seqs(
                     bed_split=bed_split,
                     center_variant=v,
                     sample_name=self.sample_id,
                 )
             else:
-                # builtin 模式
                 six_seqs = sequence_builder.build_six_seqs(
                     bed_split=bed_split,
                     center_variant=v,
-                    variants_in_region=variants,  # 传入全量 variants 用于背景过滤
+                    variants_in_region=variants,
                 )
 
             if six_seqs is None:
@@ -187,31 +239,19 @@ class Sample:
             if self.save_haplotypes:
                 self.haplotypes[vid] = self._serialize_six_seqs(six_seqs)
 
-            # 3. 提取 embedding
+            # 3. 积累到批量缓冲
             if self.save_embeddings:
-                try:
-                    emb_dict = embedding_extractor.extract(
-                        center_variant=v,
-                        up_result=six_seqs["upstream"],
-                        dn_result=six_seqs["downstream"],
-                    )
-                except Exception as e:
-                    print(f"[{self.sample_id}] ⚠ Embedding extraction failed for {vid}: {e}")
-                    continue
+                batch_variants.append(v)
+                batch_up_results.append(six_seqs["upstream"])
+                batch_dn_results.append(six_seqs["downstream"])
+                batch_meta.append((vid, six_seqs))
 
-                if vid not in self.embeddings:
-                    self.embeddings[vid] = {}
+                # 达到 batch_size 则统一推理
+                if len(batch_variants) >= variant_batch_size:
+                    flush_batch()
 
-                # 将 numpy array 转为可 JSON 序列化的 list
-                self.embeddings[vid][model_name] = {
-                    k: v_emb.tolist() for k, v_emb in emb_dict.items()
-                }
-
-            count += 1
-            if count % save_interval == 0:
-                print(f"[{self.sample_id}] 💾 Saving at {count} variants "
-                      f"(cache size: {embedding_extractor.cache_size()})")
-                self.save()
+        # 处理剩余的 variant
+        flush_batch()
 
         if skipped:
             print(f"[{self.sample_id}] ⏭  Skipped {skipped} already-processed variants")

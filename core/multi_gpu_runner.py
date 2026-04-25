@@ -54,6 +54,7 @@ def _worker(
     save_embeddings: bool,
     shared_cache: DictProxy,
     bed_split_n: int = 200,
+    variant_batch_size: int = 16,
 ):
     """
     在单张 GPU 上顺序处理分配给本进程的全部样本。
@@ -79,20 +80,23 @@ def _worker(
             builder = SequenceBuilder(ref_fasta, window_size=window_size)
             print(f"[GPU {rank}]    🔧 Using built-in SequenceBuilder")
 
-        # ----- 加载模型（注入共享 cache）-----
+        # ----- 加载模型 -----
         manager_obj = EmbeddingManager(
             model_name=model_cfg["name"],
             model_path=model_cfg["path"],
             device=device,
             dtype=model_cfg.get("dtype", "bfloat16"),
             batch_size=model_cfg["batch_size"],
-            shared_cache=shared_cache,  # ← 注入全局共享 cache
+            shared_cache=shared_cache,
             mode=model_cfg.get("mode", "local"),
         )
 
+        # EmbeddingExtractor：使用共享缓存（跨进程共享）或 None（关闭全局缓存）
+        extractor_cache = shared_cache  # dict or None
         extractor = EmbeddingExtractor(
             embedding_manager=manager_obj,
             pooling=pooling,
+            cache=extractor_cache,
         )
 
         # ----- 打开 VCF（每个子进程独立 file handle）-----
@@ -121,6 +125,7 @@ def _worker(
                 extractor,
                 n=bed_split_n,
                 save_interval=save_interval,
+                variant_batch_size=variant_batch_size,
             )
 
         vcf.close()
@@ -190,6 +195,8 @@ def run_multi_gpu(
     save_haplotypes: bool,
     save_embeddings: bool,
     bed_split_n: int = 200,
+    use_global_cache: bool = True,
+    variant_batch_size: int = 16,
 ):
     """
     将 sample_names 按 round-robin 分配给 devices，
@@ -212,11 +219,14 @@ def run_multi_gpu(
     for i, (dev, bucket) in enumerate(zip(devices, buckets)):
         print(f"   [{dev}] rank={i} → {len(bucket)} samples")
 
-    # 创建共享 cache（Manager 进程代理）
+    # 创建共享 cache（仅 use_global_cache=True 时使用）
     ctx = mp.get_context("spawn")  # Windows / CUDA 安全
     with mp.Manager() as mgr:
-        shared_cache = mgr.dict()
-        print("🔗 Shared cache initialized")
+        shared_cache = mgr.dict() if use_global_cache else None
+        if use_global_cache:
+            print("🔗 Shared cache initialized")
+        else:
+            print("🔗 Global cache disabled (variant-internal dedup only)")
 
         processes = []
         for rank, (device, bucket) in enumerate(zip(devices, buckets)):
@@ -242,8 +252,9 @@ def run_multi_gpu(
                     save_interval=save_interval,
                     save_haplotypes=save_haplotypes,
                     save_embeddings=save_embeddings,
-                    shared_cache=shared_cache,
+                    shared_cache=shared_cache if use_global_cache else None,
                     bed_split_n=bed_split_n,
+                    variant_batch_size=variant_batch_size,
                 ),
                 name=f"worker-{device}",
             )

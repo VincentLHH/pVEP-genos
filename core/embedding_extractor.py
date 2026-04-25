@@ -92,7 +92,8 @@ class EmbeddingExtractor:
     embedding_manager : EmbeddingManager 实例（本地 GPU 模式）
     pooling           : pooling 方法，"mean"（默认）或 "max"
     context_window    : 保留参数，暂不使用（未来可调整 w 的计算方式）
-    cache             : 外部传入的全局共享缓存 dict（若为 None 则使用内部缓存）
+    cache             : 全局共享缓存 dict。None 表示关闭全局缓存
+                        （仅在同一变异内部去重，不跨变异/跨样本缓存）
     """
 
     # 6 种序列的键名
@@ -112,8 +113,10 @@ class EmbeddingExtractor:
         self.manager = embedding_manager
         self.pooling = pooling
         self.context_window = context_window
-        # 全局 embedding 缓存：seq_hash → np.ndarray [D]
-        self._cache: Dict[str, np.ndarray] = cache if cache is not None else {}
+        # 全局 embedding 缓存：
+        #   dict 实例 → 跨变异/跨样本共享缓存（use_global_cache=True）
+        #   None      → 关闭全局缓存，仅在 extract() 内部临时去重
+        self._cache: Optional[Dict[str, np.ndarray]] = cache
 
     # -----------------------------------------------------------------------
     # 工具：计算变异区域提取窗口 w
@@ -167,6 +170,9 @@ class EmbeddingExtractor:
         """
         w = self.compute_w(center_variant)
 
+        # 使用全局缓存或临时缓存（关闭全局缓存时，仍在同一变异内部去重）
+        cache = self._cache if self._cache is not None else {}
+
         # 1. 收集所有需要推理的序列（正链），去重（缓存键相同则跳过）
         # 格式：{cache_key: seq_str}
         key_to_seq: Dict[str, str] = {}
@@ -202,12 +208,12 @@ class EmbeddingExtractor:
         # 3. 批量推理未命中缓存的序列，并做 tail pooling
         seqs_to_infer = [
             (ck, seq) for ck, seq in key_to_seq.items()
-            if ck not in self._cache
+            if ck not in cache
         ]
 
         if seqs_to_infer:
             cache_keys, seqs = zip(*seqs_to_infer)
-            self._run_inference(list(seqs), list(cache_keys), w)
+            self._run_inference(list(seqs), list(cache_keys), w, cache)
 
         # 4. 组装 6 种 embedding（emb_up concat emb_down）
         result: Dict[str, np.ndarray] = {}
@@ -225,8 +231,8 @@ class EmbeddingExtractor:
             up_ck = key_to_cache[("up", hap_name, mut_or_wt)]
             dn_ck = key_to_cache[("dn", hap_name, mut_or_wt)]
 
-            emb_up = self._cache[up_ck]
-            emb_dn = self._cache[dn_ck]
+            emb_up = cache[up_ck]
+            emb_dn = cache[dn_ck]
 
             result[emb_name] = np.concatenate([emb_up, emb_dn], axis=0)
 
@@ -288,14 +294,15 @@ class EmbeddingExtractor:
             per_variant_key_maps.append(key_to_cache)
 
         # 2. 按 w 分组推理（保证每个 w 使用正确的 pooling 窗口）
+        cache = self._cache if self._cache is not None else {}
         for w, ck_to_seq in per_w_seqs.items():
             seqs_to_infer = [
                 (ck, seq) for ck, seq in ck_to_seq.items()
-                if ck not in self._cache
+                if ck not in cache
             ]
             if seqs_to_infer:
                 cache_keys, seqs = zip(*seqs_to_infer)
-                self._run_inference(list(seqs), list(cache_keys), w)
+                self._run_inference(list(seqs), list(cache_keys), w, cache)
 
         # 3. 组装每个变异的 6 种 embedding
         hap_to_key_map = {
@@ -313,8 +320,8 @@ class EmbeddingExtractor:
             for emb_name, (hap_name, mut_or_wt) in hap_to_key_map.items():
                 up_ck = key_to_cache[("up", hap_name, mut_or_wt)]
                 dn_ck = key_to_cache[("dn", hap_name, mut_or_wt)]
-                emb_up = self._cache[up_ck]
-                emb_dn = self._cache[dn_ck]
+                emb_up = cache[up_ck]
+                emb_dn = cache[dn_ck]
                 emb_dict[emb_name] = np.concatenate([emb_up, emb_dn], axis=0)
             results.append(emb_dict)
 
@@ -329,15 +336,17 @@ class EmbeddingExtractor:
         seqs: List[str],
         cache_keys: List[str],
         w: int,
+        cache: Dict[str, np.ndarray],
     ) -> None:
         """
-        对 seqs 中未命中缓存的序列做批推理，tail pooling 后写入 self._cache。
+        对 seqs 中未命中缓存的序列做批推理，tail pooling 后写入 cache。
 
         参数
         ----
         seqs       : 待推理序列列表
         cache_keys : 对应的缓存键列表（包含序列哈希 + w + pooling）
         w          : tail pooling 窗口大小
+        cache      : 目标缓存 dict（全局或临时）
         """
         import torch
 
@@ -357,8 +366,8 @@ class EmbeddingExtractor:
 
             # 写入缓存
             for j, ck in enumerate(batch_cache_keys):
-                if ck not in self._cache:
-                    self._cache[ck] = (
+                if ck not in cache:
+                    cache[ck] = (
                         pooled[j].float().numpy().astype("float32")
                     )
 
@@ -367,7 +376,8 @@ class EmbeddingExtractor:
     # -----------------------------------------------------------------------
 
     def cache_size(self) -> int:
-        return len(self._cache)
+        return len(self._cache) if self._cache is not None else 0
 
     def clear_cache(self) -> None:
-        self._cache.clear()
+        if self._cache is not None:
+            self._cache.clear()

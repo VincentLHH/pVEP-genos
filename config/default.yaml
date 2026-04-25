@@ -76,13 +76,15 @@ embedding:
   # 是否在输出中保存重建的单倍型序列（可能较大）
   save_haplotypes: true
 
-  # 全局 embedding 缓存（内存中，基于序列哈希）
-  # 若变异数量极大，可设为 false 以节省内存（每个样本独立推理，不共享缓存）
+  # 是否进行推理并保存 embedding
+  save_embeddings: true
+
+  # 全局 embedding 缓存策略：
+  #   true  : 开启全局缓存（相同序列跨样本/跨变异共享，节省重复推理）
+  #   false : 关闭全局缓存，但同一变异内部的等价序列（如 0|0 时 Mut==WT）
+  #           及 WT_ref/Mut_ref 的上下行共享仍会去重，避免冗余推理
   use_global_cache: true
 
-# -------------------------------------------------------
-# 输出控制（兼容旧版配置）
-# -------------------------------------------------------
-output:
-  save_haplotypes: true   # 是否在 JSON 中保存重建的单倍型序列
-  save_embeddings: true   # 是否进行推理并保存 embedding
+  # 跨变异批量推理的积累大小（每次积累多少个 variant 的序列后统一推理）
+  # 增大此值可提高 GPU 利用率，但需更多显存
+  variant_batch_size: 16

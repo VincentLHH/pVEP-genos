@@ -185,16 +185,19 @@ def resolve_api_base_url(args, cfg, mode: str) -> str:
 
 
 def resolve_flags(args, cfg):
-    output_cfg = cfg.get("output", {})
+    """统一解析 save_haplotypes / save_embeddings，优先 CLI > embedding > output（兼容旧版）"""
+    emb_cfg = cfg.get("embedding", {})
+    out_cfg = cfg.get("output", {})
+
     save_haplotypes = (
         args.save_haplotypes
         if args.save_haplotypes is not None
-        else output_cfg.get("save_haplotypes", True)
+        else emb_cfg.get("save_haplotypes", out_cfg.get("save_haplotypes", True))
     )
     save_embeddings = (
         args.save_embeddings
         if args.save_embeddings is not None
-        else output_cfg.get("save_embeddings", True)
+        else emb_cfg.get("save_embeddings", out_cfg.get("save_embeddings", True))
     )
     return save_haplotypes, save_embeddings
 
@@ -284,11 +287,17 @@ def run_single(cfg, devices, seq_builder_type, mode, api_base_url, save_haplotyp
     pooling = embedding_cfg.get("pooling", "mean")
     n = cfg.get("bed_split", {}).get("n", 200)
     save_interval = embedding_cfg.get("save_interval", 50)
+    use_global_cache = embedding_cfg.get("use_global_cache", True)
+    variant_batch_size = embedding_cfg.get("variant_batch_size", 16)
+
+    # 缓存：use_global_cache=True 时使用全局 dict，False 时设为 None（由 Extractor 内部处理）
+    cache = {} if use_global_cache else None
 
     extractor = EmbeddingExtractor(
         embedding_manager=manager,
         pooling=pooling,
         context_window=embedding_cfg.get("context_window"),
+        cache=cache,
     )
 
     for sample_name in tqdm(samples, desc="Samples"):
@@ -313,6 +322,7 @@ def run_single(cfg, devices, seq_builder_type, mode, api_base_url, save_haplotyp
             extractor,
             n=n,
             save_interval=save_interval,
+            variant_batch_size=variant_batch_size,
         )
 
 
@@ -333,6 +343,8 @@ def run_multi(cfg, devices, seq_builder_type, save_haplotypes, save_embeddings):
     embedding_cfg = cfg.get("embedding", {})
     pooling = embedding_cfg.get("pooling", "mean")
     n = cfg.get("bed_split", {}).get("n", 200)
+    use_global_cache = embedding_cfg.get("use_global_cache", True)
+    variant_batch_size = embedding_cfg.get("variant_batch_size", 16)
 
     run_multi_gpu(
         sample_names=samples,
@@ -350,6 +362,8 @@ def run_multi(cfg, devices, seq_builder_type, save_haplotypes, save_embeddings):
         save_haplotypes=save_haplotypes,
         save_embeddings=save_embeddings,
         bed_split_n=n,
+        use_global_cache=use_global_cache,
+        variant_batch_size=variant_batch_size,
     )
 
 

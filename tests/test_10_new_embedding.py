@@ -531,7 +531,7 @@ class TestEmbeddingExtractorCache:
         import torch
 
         mgr = self._make_mock_manager()
-        extractor = EmbeddingExtractor(embedding_manager=mgr, pooling="mean")
+        extractor = EmbeddingExtractor(embedding_manager=mgr, pooling="mean", cache={})
 
         variant = Variant(chrom="chr1", pos=100, ref="A", alt="T", gt=(1, 0))
         up_result = self._make_six_seq_result("upstream")
@@ -561,7 +561,7 @@ class TestEmbeddingExtractorCache:
     def test_extract_output_shape_all_variant_types(self, ref, alt):
         """各种变异类型的输出维度均应为 hidden_dim * 2。"""
         mgr = self._make_mock_manager()
-        extractor = EmbeddingExtractor(embedding_manager=mgr, pooling="mean")
+        extractor = EmbeddingExtractor(embedding_manager=mgr, pooling="mean", cache={})
 
         variant = Variant(chrom="chr1", pos=100, ref=ref, alt=alt, gt=(1, 0))
         up_result = self._make_six_seq_result("upstream")
@@ -583,7 +583,7 @@ class TestEmbeddingExtractorCache:
         import torch
 
         mgr = self._make_mock_manager()
-        extractor = EmbeddingExtractor(embedding_manager=mgr, pooling="mean")
+        extractor = EmbeddingExtractor(embedding_manager=mgr, pooling="mean", cache={})
 
         variant = Variant(chrom="chr1", pos=100, ref="A", alt="T", gt=(1, 0))
         up_result = self._make_six_seq_result("upstream")
@@ -609,7 +609,7 @@ class TestEmbeddingExtractorCache:
         import torch
 
         mgr = self._make_mock_manager()
-        extractor = EmbeddingExtractor(embedding_manager=mgr, pooling="mean")
+        extractor = EmbeddingExtractor(embedding_manager=mgr, pooling="mean", cache={})
 
         variant = Variant(chrom="chr1", pos=100, ref="A", alt="T", gt=(0, 0))
         up_result = self._make_six_seq_result("upstream", alias=True)
@@ -631,7 +631,7 @@ class TestEmbeddingExtractorCache:
         import torch
 
         mgr = self._make_mock_manager()
-        extractor = EmbeddingExtractor(embedding_manager=mgr, pooling="mean")
+        extractor = EmbeddingExtractor(embedding_manager=mgr, pooling="mean", cache={})
 
         variant = Variant(chrom="chr1", pos=100, ref="A", alt="T", gt=(1, 0))
         up_result = self._make_six_seq_result("upstream")
@@ -652,7 +652,7 @@ class TestEmbeddingExtractorCache:
     def test_clear_cache(self):
         """clear_cache 后缓存应为空，后续提取需重新推理。"""
         mgr = self._make_mock_manager()
-        extractor = EmbeddingExtractor(embedding_manager=mgr, pooling="mean")
+        extractor = EmbeddingExtractor(embedding_manager=mgr, pooling="mean", cache={})
 
         variant = Variant(chrom="chr1", pos=100, ref="A", alt="T", gt=(1, 0))
         up_result = self._make_six_seq_result("upstream")
@@ -680,7 +680,7 @@ class TestEmbeddingExtractorCache:
         使用可区分的 mock，使 upstream 和 downstream 序列产生不同 embedding。
         """
         mgr = self._make_distinguishable_mock_manager()
-        extractor = EmbeddingExtractor(embedding_manager=mgr, pooling="mean")
+        extractor = EmbeddingExtractor(embedding_manager=mgr, pooling="mean", cache={})
 
         variant = Variant(chrom="chr1", pos=100, ref="A", alt="T", gt=(1, 0))
         up_result = self._make_six_seq_result("upstream")
@@ -749,6 +749,30 @@ class TestEmbeddingExtractorCache:
         key_max = _cache_key(seq, w=3, pooling="max")
         assert key_mean != key_max, \
             "相同序列不同 pooling 应产生不同缓存键"
+
+    @pytest.mark.cpu
+    def test_cache_disabled_still_deduplicates_within_variant(self):
+        """
+        cache=None 时全局缓存关闭，但同一变异内部的等价序列仍去重
+        （如 0|0 时 Mut==WT 使用相同序列，只推理一次）。
+        """
+        mgr = self._make_mock_manager()
+        extractor = EmbeddingExtractor(embedding_manager=mgr, pooling="mean", cache=None)
+
+        variant = Variant(chrom="chr1", pos=100, ref="A", alt="T", gt=(0, 0))
+        up_result = self._make_six_seq_result("upstream", alias=True)
+        dn_result = self._make_six_seq_result("downstream", alias=True)
+
+        embs = extractor.extract(
+            center_variant=variant,
+            up_result=up_result,
+            dn_result=dn_result,
+        )
+
+        # 结果仍正确：Mut_hap1 == WT_hap1
+        np.testing.assert_array_equal(embs["Mut_hap1"], embs["WT_hap1"])
+        # 全局缓存大小为 0（禁用）
+        assert extractor.cache_size() == 0
 
 
 # ===========================================================================
