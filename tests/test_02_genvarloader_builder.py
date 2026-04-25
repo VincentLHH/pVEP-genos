@@ -59,7 +59,7 @@ from core.genvarloader_builder import (
     GenVarLoaderSequenceBuilder,
     _numpy_bytes_to_str,
 )
-from core.sequence_builder import _reverse_complement
+from core.sequence_builder import reverse_complement as _reverse_complement
 from core.variant import Variant
 
 
