@@ -24,6 +24,8 @@ class MultiOmicsDataLoader:
     """
     多组学数据加载器。
 
+    加载流程：先探查各数据源可用样本ID → 求交集 → 只加载公共样本数据。
+
     用法：
         loader = MultiOmicsDataLoader(config)
         X, y, feature_names, sample_ids = loader.load_all()
@@ -46,19 +48,22 @@ class MultiOmicsDataLoader:
         """
         加载全部数据并整合。
 
+        流程：先对齐样本ID，再按需加载，避免浪费内存。
+
         Returns:
             X: 特征矩阵 (n_samples, n_features)
             y: 标签向量 (n_samples,)
             feature_names: 特征名列表
             sample_ids: 样本ID列表
         """
+        # 第一步：加载标签并探查各源可用ID
         self._load_labels()
-        self._load_emb()
-        self._load_metab()
-        self._load_pheno()
+        common_ids = self._peek_and_align_ids()
 
-        # 对齐样本顺序
-        self._align_samples()
+        # 第二步：只加载公共样本的数据
+        self._load_emb(common_ids)
+        self._load_metab(common_ids)
+        self._load_pheno(common_ids)
 
         # 整合特征
         X = self._assemble_features()
@@ -119,6 +124,10 @@ class MultiOmicsDataLoader:
         X = self._fill_na(X)
         return X, self._labels.values, feature_names, self._sample_ids
 
+    # ------------------------------------------------------------------
+    # 标签加载
+    # ------------------------------------------------------------------
+
     def _load_labels(self):
         """加载标签"""
         if not self.cfg.label_file:
@@ -132,20 +141,77 @@ class MultiOmicsDataLoader:
 
         self._labels = df.set_index(self.cfg.sample_id_col)[self.cfg.label_col]
 
-    def _load_emb(self):
-        """加载基因组embedding"""
+    # ------------------------------------------------------------------
+    # ID 探查与对齐
+    # ------------------------------------------------------------------
+
+    def _peek_and_align_ids(self) -> pd.Index:
+        """
+        先探查各数据源可用样本ID，求交集，再裁剪标签。
+        返回公共样本ID（已排序），后续加载只处理这些样本。
+        """
+        common_idx = self._labels.index
+
+        # 探查 embedding 可用ID（只列文件名，不解析内容）
+        if self.cfg.emb_dir:
+            emb_dir = Path(self.cfg.emb_dir)
+            if emb_dir.exists():
+                emb_ids = pd.Index(
+                    f.stem for f in emb_dir.glob("*.json")
+                )
+                common_idx = common_idx.intersection(emb_ids)
+
+        # 探查代谢组可用ID（只读 sample_id 列）
+        if self.cfg.metab_file:
+            metab_path = Path(self.cfg.metab_file)
+            if metab_path.exists():
+                id_col = self.cfg.sample_id_col
+                avail_ids = pd.read_csv(metab_path, usecols=[id_col])[id_col]
+                common_idx = common_idx.intersection(pd.Index(avail_ids))
+
+        # 探查表型组可用ID（只读 sample_id 列）
+        if self.cfg.pheno_file:
+            pheno_path = Path(self.cfg.pheno_file)
+            if pheno_path.exists():
+                id_col = self.cfg.sample_id_col
+                avail_ids = pd.read_csv(pheno_path, usecols=[id_col])[id_col]
+                common_idx = common_idx.intersection(pd.Index(avail_ids))
+
+        if len(common_idx) == 0:
+            raise ValueError("各数据源无共同样本")
+
+        common_idx = common_idx.sort_values()
+        self._sample_ids = list(common_idx)
+        self._labels = self._labels.loc[common_idx]
+        return common_idx
+
+    # ------------------------------------------------------------------
+    # 各模态加载（只加载 common_ids 内的样本）
+    # ------------------------------------------------------------------
+
+    def _load_emb(self, common_ids: pd.Index):
+        """
+        加载基因组embedding，只加载 common_ids 中的样本。
+
+        Args:
+            common_ids: 公共样本ID索引
+        """
         if not self.cfg.emb_dir:
             warnings.warn("emb_dir 未配置，跳过基因组特征")
-            self._emb_features = pd.DataFrame(index=self._labels.index)
+            self._emb_features = pd.DataFrame(index=common_ids)
             return
 
         emb_dir = Path(self.cfg.emb_dir)
         if not emb_dir.exists():
             raise FileNotFoundError(f"Embedding目录不存在: {emb_dir}")
 
+        id_set = set(common_ids)
         emb_dict = {}
         for emb_file in sorted(emb_dir.glob("*.json")):
             sample_id = emb_file.stem
+            if sample_id not in id_set:
+                continue
+
             with open(emb_file) as f:
                 data = json.load(f)
 
@@ -178,7 +244,7 @@ class MultiOmicsDataLoader:
         if not emb_dict:
             raise ValueError("未找到任何有效的embedding数据")
 
-        # 转为DataFrame
+        # 转为DataFrame，按 common_ids 排序对齐
         n_dims = len(next(iter(emb_dict.values())))
         emb_df = pd.DataFrame(
             emb_dict,
@@ -186,66 +252,61 @@ class MultiOmicsDataLoader:
         ).T
         emb_df.index.name = self.cfg.sample_id_col
 
-        self._emb_features = emb_df
+        # 只保留 common_ids 中的样本
+        self._emb_features = emb_df.loc[emb_df.index.isin(common_ids)]
+        self._emb_features = self._emb_features.loc[common_ids]
 
-    def _load_metab(self):
-        """加载代谢组数据"""
+    def _load_metab(self, common_ids: pd.Index):
+        """
+        加载代谢组数据，只保留 common_ids 中的样本。
+
+        Args:
+            common_ids: 公共样本ID索引
+        """
         if not self.cfg.metab_file:
             warnings.warn("metab_file 未配置，跳过代谢组特征")
-            self._metab_features = pd.DataFrame(index=self._labels.index)
+            self._metab_features = pd.DataFrame(index=common_ids)
             return
 
         df = pd.read_csv(self.cfg.metab_file)
         if self.cfg.sample_id_col not in df.columns:
             warnings.warn(f"代谢组文件中未找到列: {self.cfg.sample_id_col}")
-            self._metab_features = pd.DataFrame(index=self._labels.index)
+            self._metab_features = pd.DataFrame(index=common_ids)
             return
 
-        # 设置索引，移除ID列
+        # 设置索引，移除ID列，只保留公共样本
         df = df.set_index(self.cfg.sample_id_col)
+        df = df.loc[df.index.isin(common_ids)]
         numeric_cols = df.select_dtypes(include=[np.number]).columns
-        self._metab_features = df[numeric_cols]
+        self._metab_features = df[numeric_cols].loc[common_ids]
 
-    def _load_pheno(self):
-        """加载表型组数据"""
+    def _load_pheno(self, common_ids: pd.Index):
+        """
+        加载表型组数据，只保留 common_ids 中的样本。
+
+        Args:
+            common_ids: 公共样本ID索引
+        """
         if not self.cfg.pheno_file:
             warnings.warn("pheno_file 未配置，跳过表型组特征")
-            self._pheno_features = pd.DataFrame(index=self._labels.index)
+            self._pheno_features = pd.DataFrame(index=common_ids)
             return
 
         df = pd.read_csv(self.cfg.pheno_file)
         if self.cfg.sample_id_col not in df.columns:
             warnings.warn(f"表型组文件中未找到列: {self.cfg.sample_id_col}")
-            self._pheno_features = pd.DataFrame(index=self._labels.index)
+            self._pheno_features = pd.DataFrame(index=common_ids)
             return
 
+        # 设置索引，移除ID列，只保留公共样本
         df = df.set_index(self.cfg.sample_id_col)
+        df = df.loc[df.index.isin(common_ids)]
         numeric_cols = df.select_dtypes(include=[np.number]).columns
-        self._pheno_features = df[numeric_cols]
+        self._pheno_features = df[numeric_cols].loc[common_ids]
 
-    def _align_samples(self):
-        """按标签对齐所有数据源的样本顺序"""
-        common_idx = self._labels.index
-
-        if self._emb_features is not None and not self._emb_features.empty:
-            common_idx = common_idx.intersection(self._emb_features.index)
-        if self._metab_features is not None and not self._metab_features.empty:
-            common_idx = common_idx.intersection(self._metab_features.index)
-        if self._pheno_features is not None and not self._pheno_features.empty:
-            common_idx = common_idx.intersection(self._pheno_features.index)
-
-        if len(common_idx) == 0:
-            raise ValueError("各数据源无共同样本")
-
-        self._sample_ids = list(common_idx)
-        self._labels = self._labels.loc[common_idx]
-
-        if self._emb_features is not None:
-            self._emb_features = self._emb_features.loc[common_idx]
-        if self._metab_features is not None:
-            self._metab_features = self._metab_features.loc[common_idx]
-        if self._pheno_features is not None:
-            self._pheno_features = self._pheno_features.loc[common_idx]
+    # ------------------------------------------------------------------
+    # 特征整合
+    # ------------------------------------------------------------------
 
     def _assemble_features(self, modules: Optional[List[str]] = None) -> np.ndarray:
         """
