@@ -132,6 +132,7 @@ class GlobalConfig:
     random_state: int = 42
     n_jobs: int = -1  # 并行任务数，-1使用所有CPU
     data: DataConfig = field(default_factory=DataConfig)
+    preprocess: PreprocessConfig = field(default_factory=PreprocessConfig)
     cv: CVConfig = field(default_factory=CVConfig)
     hyperparam: HyperparamConfig = field(default_factory=HyperparamConfig)
     ablation: AblationConfig = field(default_factory=AblationConfig)
@@ -144,7 +145,7 @@ def load_config(path: str) -> GlobalConfig:
         raw = yaml.safe_load(f)
 
     cfg = GlobalConfig()
-    for section in ["data", "cv", "hyperparam", "ablation", "output"]:
+    for section in ["data", "preprocess", "cv", "hyperparam", "ablation", "output"]:
         if section in raw:
             section_cfg = getattr(cfg, section)
             for k, v in raw[section].items():

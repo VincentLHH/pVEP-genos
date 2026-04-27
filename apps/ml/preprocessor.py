@@ -231,12 +231,24 @@ class MultiOmicsPreprocessor:
         # 自动推断列索引
         if feature_names is not None:
             self._infer_column_indices(feature_names)
+        elif self.emb_feature_indices is None and self.tab_feature_indices is None:
+            # 无特征名且无手动索引 -> 根据列数启发式分割
+            n_features = X.shape[1]
+            n_emb = min(X.shape[0], n_features // 2)
+            self.emb_feature_indices = list(range(n_emb))
+            self.tab_feature_indices = list(range(n_emb, n_features))
 
         # 构建 pipeline
         self._build_pipeline()
 
-        # Fit
-        self.pipeline_.fit(X)
+        # 分别 fit 各子 pipeline
+        if self.emb_pipeline_ is not None:
+            X_emb = X[:, self.emb_feature_indices]
+            self.emb_pipeline_.fit(X_emb)
+
+        if self.tab_pipeline_ is not None:
+            X_tab = X[:, self.tab_feature_indices]
+            self.tab_pipeline_.fit(X_tab)
 
         return self
 
@@ -259,9 +271,7 @@ class MultiOmicsPreprocessor:
 
         # genome embedding -> 降维
         if self.emb_feature_indices:
-            self.emb_selector_ = ColumnSelector(self.emb_feature_indices)
             self.emb_pipeline_ = make_pipeline(
-                ColumnSelector(self.emb_feature_indices),
                 EmbeddingReducer(
                     n_components=self.emb_n_components,
                     standardize_first=self.emb_standardize_first,
@@ -273,14 +283,10 @@ class MultiOmicsPreprocessor:
         # tabular data -> 填补
         if self.tab_feature_indices:
             self.tab_pipeline_ = make_pipeline(
-                ColumnSelector(self.tab_feature_indices),
                 TableImputer(strategy=self.tab_strategy),
             )
         else:
             self.tab_pipeline_ = None
-
-        # Fit pipelines
-        X = np.random.randn(10, len(self.emb_feature_indices or []) + len(self.tab_feature_indices or []))
 
     def fit_transform(self, X, feature_names=None):
         """fit + transform"""
@@ -298,11 +304,13 @@ class MultiOmicsPreprocessor:
         parts = []
 
         if self.emb_pipeline_ is not None:
-            emb_part = self.emb_pipeline_.transform(X)
+            X_emb = X[:, self.emb_feature_indices]
+            emb_part = self.emb_pipeline_.transform(X_emb)
             parts.append(emb_part)
 
         if self.tab_pipeline_ is not None:
-            tab_part = self.tab_pipeline_.transform(X)
+            X_tab = X[:, self.tab_feature_indices]
+            tab_part = self.tab_pipeline_.transform(X_tab)
             parts.append(tab_part)
 
         if not parts:

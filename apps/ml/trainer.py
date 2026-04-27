@@ -168,8 +168,6 @@ class MLTrainer:
         fold_scores_list = []
         best_score = -1
         best_params = None
-        best_preprocessor = None
-        best_fold_model = None
 
         for fold_idx, (train_idx, val_idx) in enumerate(self.cv.split(X, y)):
             X_train, X_val = X[train_idx], X[val_idx]
@@ -201,13 +199,13 @@ class MLTrainer:
                         fold_best_model = model
 
                 fold_scores_list.append(fold_best_score)
+                # OOF预测用当前fold最佳模型
+                oof_preds[val_idx] = fold_best_model.predict(X_val_proc)
+                oof_probas[val_idx] = fold_best_model.predict_proba(X_val_proc)[:, 1]
 
                 if fold_best_score > best_score:
                     best_score = fold_best_score
                     best_params = fold_best_params
-                    best_fold_model = fold_best_model
-                    # 保存这个fold的预处理器用于最终模型
-                    best_preprocessor = self._get_preprocessor(X_train)
 
             else:
                 # 无超参搜索
@@ -226,16 +224,13 @@ class MLTrainer:
                     fold_score = model.score(X_val_proc, y_val)
 
                 fold_scores_list.append(fold_score)
+                # OOF预测用当前fold模型
+                oof_preds[val_idx] = model.predict(X_val_proc)
+                oof_probas[val_idx] = model.predict_proba(X_val_proc)[:, 1]
 
                 if fold_score > best_score:
                     best_score = fold_score
                     best_params = params
-                    best_fold_model = model
-                    best_preprocessor = self._get_preprocessor(X_train)
-
-            # OOF预测
-            oof_preds[val_idx] = best_fold_model.predict(X_val_proc)
-            oof_probas[val_idx] = best_fold_model.predict_proba(X_val_proc)[:, 1]
 
             if verbose:
                 print(f"  Fold {fold_idx + 1}: {scoring}={fold_scores_list[-1]:.4f}")
@@ -256,9 +251,9 @@ class MLTrainer:
             print(f"最佳参数: {best_params}")
 
         # 使用全部数据训练最终模型
-        if best_preprocessor is not None:
-            best_preprocessor.fit(X)
-            X_proc = best_preprocessor.transform(X)
+        if self._preprocessor is not None:
+            self._preprocessor.fit(X)
+            X_proc = self._preprocessor.transform(X)
         else:
             X_proc = X
 
@@ -334,7 +329,10 @@ class MLTrainer:
         all_results = {}
 
         for model_name in model_names:
-            param_grid = param_grids.get(model_name)
+            if param_grids and model_name in param_grids:
+                param_grid = get_param_grid(model_name, param_grids)
+            else:
+                param_grid = None
             results = self.cv_evaluate(
                 X, y, model_name,
                 param_grid=param_grid,

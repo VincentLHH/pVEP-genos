@@ -19,6 +19,7 @@ from sklearn.metrics import (
     precision_recall_curve,
     precision_score,
     recall_score,
+    roc_auc_score,
     roc_curve,
 )
 
