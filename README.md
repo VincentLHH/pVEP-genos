@@ -255,8 +255,8 @@ curl -X POST http://localhost:8000/embed \
 
 | 参数 | 位置 | 类型 | 默认值 | 说明 |
 |------|------|------|--------|------|
-| `n` | `bed_split.n` | int | 200 | BED 拆分侧翼扩展长度（bp）。定义变异位点单侧的上下文范围。上游行 = n bp上游 + 变异区域 + 1 bp下游；下游行 = 1 bp上游 + 变异区域 + n bp下游。需满足 `n >= window_size // 2 + max(len(alt), len(ref)) + 2` |
-| `window_size` | 顶层 | int | 128 | 每个方向（upstream/downstream）送入模型的序列长度（bp）。决定了模型推理时能看到的上下文范围。需与 `n` 配合，确保 BED 行长度足以覆盖 |
+| `n` | `bed_split.n` | int | 200 | BED 拆分侧翼扩展长度（bp）。上游行 = n bp上游 + 变异区域 + 1 bp下游；下游行 = 1 bp上游 + 变异区域 + n bp下游。BED 行总长度 = n + len(ref) + 1 bp，即模型实际输入序列长度 |
+| `window_size` | 顶层 | int | 128 | 旧版 pipeline 遗留参数，仅用于已废弃的 `build()` 方法（居中窗口模式）。新版 pipeline（`build_six_seqs` + tail pooling）中不参与序列构建或推理控制 |
 | `batch_size` | `model.batch_size` | int | 32 | GPU 推理批次大小，即每次前向传播处理的序列条数。增大可提升 GPU 利用率，但需更多显存。与 `variant_batch_size` 独立 |
 | `variant_batch_size` | `embedding.variant_batch_size` | int | 16 | 跨变异批量推理的积累大小。每积累 N 个 variant 的序列后统一送入 GPU 推理。配合 `batch_size` 使用：`variant_batch_size` × 每个variant约8条唯一序列 ≈ 总序列数，需 ≥ `batch_size` 才能充分利用 GPU |
 | `do_inference` | `embedding.do_inference` | bool | true | 是否执行模型推理。`false` 时仅构建序列，不运行模型、不产生 embedding。适用于调试序列构建或只保存单倍型 |
@@ -269,15 +269,16 @@ curl -X POST http://localhost:8000/embed \
 ```
 BED 行长度 = n + len(ref) + 1 bp
 
-n 决定了 BED 行多长（即序列构建时提取多少上下文）
-window_size 决定了推理时模型看到多少上下文
-
-约束：n >= window_size // 2 + max(len(alt), len(ref)) + 2
-      （确保 BED 行长度 >= window_size）
+n 决定了 BED 行多长（即序列构建时提取多少上下文）。
+模型直接以 BED 行序列作为输入，tokenizer 自带 truncation 处理超长序列。
+window_size 是旧版 pipeline 的遗留参数，仅用于已废弃的 build() 方法，
+在新版 pipeline（build_six_seqs + tail pooling）中不参与序列构建。
 
 典型配置：
-  window_size=128, n=200 → BED 行 ~202 bp → 模型看 202 bp
-  window_size=256, n=400 → BED 行 ~402 bp → 模型看 402 bp
+  n=200 → BED 行长度 = 201~205 bp（SNP ~202 bp, 6bp DEL ~207 bp）
+  n=400 → BED 行长度 = 401~407 bp
+
+选择 n 时应确保 BED 行长度在模型最大输入长度以内，且包含充足上下文。
 ```
 
 #### batch_size 与 variant_batch_size 的关系
@@ -532,7 +533,7 @@ seq_builder:
 
 ### Q: VCF 中有多个样本，如何指定处理哪些？
 
-修改 config 中的 `samples` 字段（留空则处理所有样本）。
+当前版本处理 VCF 中的所有样本。如需指定子集，建议先用 `bcftools view -s` 过滤 VCF 后再运行 pipeline。
 
 ### Q: embedding 向量维度是多少？
 
@@ -567,115 +568,113 @@ curl -X DELETE http://localhost:8000/cache
 
 ### 核心设计
 
-- **变异显著性评分**：基于余弦距离的相对扰动分数，按变异对表型的影响程度排序
-- **Top-k 选择**：每个样本选取最具显著性的 k 个变异，避免无关变异噪音
-- **防数据泄露**：所有预处理（填补、标准化、PCA）仅在每折训练集上拟合
-- **可扩展深度模型**：`BaseClassifier` 抽象基类 + `TorchClassifier` 骨架，可无痛接入 PyTorch 模型
+- **多组学整合**：基因组 embedding（来自 pVEP-genos pipeline）+ 代谢组 + 表型组，统一为特征矩阵
+- **样本级聚合**：每个样本的多个变异 embedding 按 mean/max 聚合为固定维度向量
+- **防数据泄露**：PCA 降维和缺失值填补仅在每折训练集上拟合，杜绝测试集信息泄露
+- **可扩展模型**：sklearn + PyTorch 分类器统一接口，自动超参搜索
 
 ### 目录结构
 
 ```
 apps/
-├── main.py                 # 入口（python -m apps.main）
-├── config.yaml             # 配置文件
-├── utils.py                # 日志、种子、配置解析
-├── data/
-│   ├── loader.py           # 加载 emb 和表格数据
-│   └── preprocess.py       # 预处理（防泄露 pipeline）
-├── features/
-│   ├── variant_scoring.py  # 变异评分策略 + Top-k 选择
-│   └── aggregation.py      # 聚合和降维
-├── models/
-│   ├── classifiers.py      # BaseClassifier + sklearn/Torch 适配器 + 工厂
-│   └── trainer.py          # 交叉验证、超参搜索
-├── evaluation/
-│   ├── metrics.py          # 指标计算（AUROC, F1, etc.）
-│   └── visualize.py        # 绘图函数
-└── configs/
-    └── default_ml.yaml     # 旧版配置（兼容）
+├── configs/
+│   └── default_ml.yaml         # 默认配置文件
+└── ml/
+    ├── __init__.py
+    ├── run_ml.py               # 主入口
+    ├── config.py               # 配置管理（dataclass 驱动）
+    ├── data_loader.py          # 多组学数据加载（embedding + 代谢组 + 表型组）
+    ├── preprocessor.py         # 预处理（防泄露 pipeline：PCA + 填补）
+    ├── models.py               # 分类器模型 + 工厂（sklearn + PyTorch）
+    ├── trainer.py              # 交叉验证 + 超参搜索
+    ├── evaluator.py            # 评估指标与可视化
+    └── ablator.py              # 消融实验管理
 ```
 
 ### 数据流
 
 ```
-Emb 文件 (JSON/HDF5)  ──▶  变异评分 (cosine distance)  ──▶  Top-k 选择
-                                                                    │
-                                                                    ▼
-表格数据 (CSV/TSV)    ──▶  预处理 (填补+标准化)         ◀──  聚合 (concat+mean)
-                                                                    │
-                                                                    ▼
-标签 (CSV)            ──▶  对齐样本  ──▶  特征矩阵 X, 标签 y  ──▶  模型训练
-                                                                    │
-                                                                    ▼
-                                                            评估 + 可视化 + 消融
+Emb JSON ({sample_id}.json)  ──▶  按样本聚合 (mean/max)  ──▶  genome 特征
+                                                                      │
+                                                                      ▼
+代谢组 CSV                   ──▶  加载 + 样本对齐  ──▶  特征拼接 (hstack)
+                                                                      │
+表型组 CSV                   ──▶  加载 + 样本对齐  ──▶               │
+                                                                      ▼
+标签 CSV                     ──▶  样本对齐  ──▶  预处理 (PCA + 填补)  ──▶  模型训练
+                                                                      │
+                                                                      ▼
+                                                              评估 + 可视化 + 消融
 ```
 
-### 变异评分方法
+### Embedding 聚合方法
 
-默认方法（相对扰动分数）：
+每个样本的多个变异 embedding 聚合为固定维度向量：
 
 ```
-for each variant:
-    dist_hap1 = cosine_distance(Mut_hap1, WT_hap1)
-    dist_hap2 = cosine_distance(Mut_hap2, WT_hap2)
-    dist_ref  = cosine_distance(Mut_ref, WT_ref)
-    score = (dist_hap1/dist_ref + dist_hap2/dist_ref) / 2
+对于样本 s 的每个变异 v_i:
+  取 Mut_hap1 向量（或 WT_hap1 / Mut_hap2 等，由变异的基因型决定）
+
+聚合策略（由 data.emb_aggregation 配置）:
+  mean: emb_s = mean(emb_{v_1}, emb_{v_2}, ..., emb_{v_k})    # 默认
+  max:  emb_s = max(emb_{v_1}, emb_{v_2}, ..., emb_{v_k})
 ```
 
-可选策略：`relative`（默认）、`sum`（距离和）、`max`（最大距离）、`hap1_only`。
+聚合后每个样本得到一个 `hidden_size × 2` 维的特征向量，进入 PCA 降维后作为基因组模态特征。
 
-### 消融实验特征组
+### 消融实验模态组合
 
-| 特征组 | 说明 |
-|--------|------|
-| `emb` | 仅变异 embedding（降维后） |
-| `table` | 仅表格特征 |
-| `metabolomics` | 仅代谢组列（按前缀筛选） |
-| `phenotype` | 仅表型组列（按前缀筛选） |
-| `full` | emb + 全部表格 |
-| `emb_no_background` | 仅 Mut_ref/WT_ref embedding |
+| 组合 | 说明 |
+|------|------|
+| `genome_only` | 仅基因组 embedding（降维后） |
+| `metab_only` | 仅代谢组特征 |
+| `pheno_only` | 仅表型组特征 |
+| `genome+metab` | 基因组 + 代谢组 |
+| `genome+pheno` | 基因组 + 表型组 |
+| `metab+pheno` | 代谢组 + 表型组 |
+| `all` | 全模态（基因组 + 代谢组 + 表型组） |
 
 ### 快速开始
 
 ```bash
-# 1. 配置（编辑 apps/config.yaml）
-vim apps/config.yaml
+# 1. 配置（编辑 apps/configs/default_ml.yaml）
+vim apps/configs/default_ml.yaml
 
-# 2. 完整运行
-python -m apps.main --config apps/config.yaml
+# 2. 完整运行（超参搜索 + 消融实验）
+python apps/ml/run_ml.py --config apps/configs/default_ml.yaml
 
-# 3. 只跑消融实验
-python -m apps.main --config apps/config.yaml --ablation-only
+# 3. 只跑消融实验（使用已有最佳参数）
+python apps/ml/run_ml.py --config apps/configs/default_ml.yaml --ablation-only
 
 # 4. 指定模型
-python -m apps.main --config apps/config.yaml --models lr xgb
+python apps/ml/run_ml.py --config apps/configs/default_ml.yaml --models xgboost svm
 
-# 5. 跳过超参搜索
-python -m apps.main --config apps/config.yaml --no-hyperparam-search
+# 5. 跳过超参搜索（使用默认参数）
+python apps/ml/run_ml.py --config apps/configs/default_ml.yaml --no-hyperparam-search
 ```
 
 ### 配置文件示例
 
 ```yaml
-# apps/config.yaml
+# apps/configs/default_ml.yaml
 
 # 数据源
-emb_path: "/path/to/embeddings"       # emb 目录（包含 {sample_id}.json 文件）或 HDF5 文件
-table_path: "/path/to/metadata.csv"   # 表格数据（含标签）
-sample_id_col: "sample_id"
-label_col: "label"
-metabolomics_prefix: "metab_"
-phenotype_prefix: "pheno_"
+data:
+  emb_dir: "/path/to/embeddings"       # emb 目录（包含 {sample_id}.json 文件）
+  metab_file: "/path/to/metabolomics.csv"
+  pheno_file: "/path/to/phenotypes.csv"
+  label_file: "/path/to/labels.csv"
+  sample_id_col: "sample_id"
+  label_col: "label"
+  emb_aggregation: "mean"              # mean / concat
 
-# 变异评分与选择
-top_k: 10
-score_method: "relative"              # relative / sum / max / hap1_only
-variant_merge: "concat"               # concat / sum / mean
-pooling: "mean"                       # mean / max / sum
-
-# 预处理
-pca_dim: 0                            # 0 不降维
-impute_strategy: "median"
+# 预处理（仅在训练集上拟合，防止数据泄露）
+preprocess:
+  enabled: true
+  emb_reducer: "pca"                   # pca / none
+  emb_n_components: "auto"             # auto 或整数（如 128）
+  emb_standardize_first: true
+  tab_impute_strategy: "median"        # median / mean / most_frequent / zero
 
 # 交叉验证
 cv:
@@ -683,50 +682,55 @@ cv:
   stratified: true
   shuffle: true
 
-# 分类器
-classifiers: [lr, svm, rf, xgb, mlp]
-
 # 消融实验
 ablation:
-  feature_groups: [emb, table, full]
-  model: "xgb"
+  modules:
+    - genome_only
+    - genome+metab
+    - genome+pheno
+    - all
+  save_dir: "outputs/ablation"
+
+# 输出
+output:
+  save_dir: "outputs/ml"
 
 # 全局
 random_state: 42
-output_dir: "outputs/ml"
+n_jobs: -1
 ```
 
 ### 模型支持
 
-| 模型 | 类型 | 说明 |
-|------|------|------|
-| `lr` | sklearn | 逻辑回归，可解释性强 |
-| `svm` | sklearn | 支持向量机，适合高维小样本 |
-| `rf` | sklearn | 随机森林，特征重要性 |
-| `xgb` | sklearn | XGBoost，性能强 |
-| `mlp` | sklearn | 多层感知机 |
-| `torch_mlp` | PyTorch | 深度 MLP 骨架（可自定义网络） |
+| 模型 | 标识符 | 类型 | 说明 |
+|------|--------|------|------|
+| SVM | `svm` | sklearn | 支持向量机，适合高维小样本 |
+| Logistic Regression | `logistic_regression` | sklearn | 逻辑回归，可解释性强 |
+| XGBoost | `xgboost` | sklearn | 梯度提升树，性能强 |
+| MLP | `mlp` | sklearn | 多层感知机，带 early stopping |
 
 ### 输出说明
 
 ```
 outputs/ml/
-├── run.log                    # 运行日志
-├── run_config.yaml            # 保存的运行配置
-├── metrics_summary.csv        # 各模型指标汇总
-├── model_comparison.png       # 模型对比柱状图
-├── pca_plot.png               # PCA 散点图
-├── roc_lr.png                 # ROC 曲线（二分类）
-├── ablation.png               # 消融实验条形图
-└── ...
+├── run_config.yaml                          # 保存的运行配置
+├── {module}_{model}_cv_results.json         # 交叉验证结果
+├── {module}_{model}_params.json             # 最佳超参
+├── {module}_{model}_predictions.json        # 预测结果
+├── {module}_{model}_evaluation.json         # 评估指标
+└── outputs/ablation/
+    ├── ablation_summary.csv                 # 消融实验汇总表
+    ├── best_config.json                     # 最佳模态+模型配置
+    ├── full_ablation_results.json           # 完整消融结果
+    └── ablation_comparison.png              # 消融对比图
 ```
 
 ### 测试
 
 ```bash
-# 运行 ML 模块测试
-pytest tests/test_ml.py -v
-
 # 运行全部测试
 pytest tests/ -v
+
+# 跳过 GPU 依赖测试
+pytest tests/ -v -m "cpu"
 ```
