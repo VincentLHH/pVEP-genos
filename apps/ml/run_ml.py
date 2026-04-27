@@ -192,6 +192,7 @@ def run_full_pipeline(cfg: GlobalConfig, args):
             param_grids=cfg.hyperparam.__dict__,
             scoring="roc_auc",
             verbose=args.verbose,
+            feature_names=feature_names,
         )
 
         # 保存结果

@@ -237,7 +237,7 @@ class MLTrainer:
 
         # 使用全部数据训练最终模型
         if self._preprocessor is not None:
-            self._preprocessor.fit(X)
+            self._preprocessor.fit(X, feature_names=feature_names)
             X_proc = self._preprocessor.transform(X)
         else:
             X_proc = X

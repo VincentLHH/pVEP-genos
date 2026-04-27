@@ -110,6 +110,15 @@ def create_model(model_name: str, random_state: int = 42, **model_params) -> Sta
         "min_child_weight", "gamma", "reg_alpha", "reg_lambda",
         "scale_pos_weight", "objective", "eval_metric",
     }
+    _MLP_PARAMS = {
+        "hidden_layer_sizes", "activation", "solver", "alpha", "batch_size",
+        "learning_rate", "learning_rate_init", "power_t", "max_iter",
+        "shuffle", "random_state", "tol", "verbose", "warm_start",
+        "momentum", "nesterovs_momentum", "early_stopping",
+        "validation_fraction", "beta_1", "beta_2", "epsilon",
+        "n_iter_no_change", "max_fun",
+        "dropout",  # not a native sklearn param; handled below
+    }
 
     if model_name == "svm":
         extra = set(model_params) - _SVC_PARAMS
@@ -151,13 +160,13 @@ def create_model(model_name: str, random_state: int = 42, **model_params) -> Sta
         return StandardizableModel(model, need_scaling=False)
 
     elif model_name == "mlp":
-        # 提取MLP特定参数
-        mlp_params = {k: v for k, v in model_params.items() if k in [
-            "hidden_layer_sizes", "activation", "alpha", "max_iter",
-            "early_stopping", "learning_rate_init"
-        ]}
+        extra = set(model_params) - _MLP_PARAMS
+        if extra:
+            import warnings
+            warnings.warn(f"MLP ignoring unknown params: {extra}")
+        mlp_params = {k: v for k, v in model_params.items() if k in _MLP_PARAMS}
 
-        # dropout通过特殊方式处理（简化为alpha正则化）
+        # dropout 不是 sklearn 原生参数，转换为 alpha 正则化
         if "dropout" in model_params:
             dropout = model_params["dropout"]
             if dropout > 0:
@@ -165,7 +174,7 @@ def create_model(model_name: str, random_state: int = 42, **model_params) -> Sta
 
         model = MLPClassifier(
             random_state=random_state,
-            **mlp_params
+            **mlp_params,
         )
         return StandardizableModel(model, need_scaling=True)
 
