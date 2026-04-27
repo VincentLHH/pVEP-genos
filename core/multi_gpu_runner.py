@@ -282,4 +282,5 @@ def run_multi_gpu(
             )
 
         print(f"✅ All {len(processes)} GPU worker(s) finished")
-        print(f"   Shared cache final size: {len(shared_cache)} entries")
+        if shared_cache is not None:
+            print(f"   Shared cache final size: {len(shared_cache)} entries")
