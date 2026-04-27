@@ -130,21 +130,24 @@ class TableImputer(BaseEstimator, TransformerMixin):
         self.strategy = strategy
 
     def fit(self, X, y=None):
-        X = np.asarray(X)
+        X = np.asarray(X, dtype=float)
 
         if self.strategy == "median":
-            self.fill_value_ = float(np.nanmedian(X))
+            self.fill_value_ = np.nanmedian(X, axis=0)  # per-column
         elif self.strategy == "mean":
-            self.fill_value_ = float(np.nanmean(X))
+            self.fill_value_ = np.nanmean(X, axis=0)     # per-column
         elif self.strategy == "most_frequent":
-            # 众数（忽略NaN）
-            flat = X[~np.isnan(X)].flatten()
-            if len(flat) == 0:
-                self.fill_value_ = 0.0
-            else:
-                # 简单众数
-                from collections import Counter
-                self.fill_value_ = Counter(flat).most_common(1)[0][0]
+            # 每列独立众数（忽略NaN）
+            n_cols = X.shape[1]
+            self.fill_value_ = np.zeros(n_cols)
+            for j in range(n_cols):
+                col = X[:, j]
+                col_valid = col[~np.isnan(col)]
+                if len(col_valid) == 0:
+                    self.fill_value_[j] = 0.0
+                else:
+                    from collections import Counter
+                    self.fill_value_[j] = Counter(col_valid).most_common(1)[0][0]
         elif self.strategy == "zero":
             self.fill_value_ = 0.0
 
@@ -152,7 +155,10 @@ class TableImputer(BaseEstimator, TransformerMixin):
 
     def transform(self, X):
         X = np.asarray(X, dtype=float)
-        return np.nan_to_num(X, nan=self.fill_value_)
+        nan_mask = np.isnan(X)
+        if nan_mask.any():
+            X = np.where(nan_mask, self.fill_value_, X)
+        return X
 
     def fit_transform(self, X, y=None):
         return self.fit(X, y).transform(X)

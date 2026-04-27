@@ -43,6 +43,15 @@ class DataConfig:
     cascade_lambda: float = 2.0
     # top-k 变异 embedding 聚合方式：mean / max
     emb_aggregation: str = "mean"
+
+    # 单个变异的 embedding 表示策略：
+    #   mut_hap1:             仅 Mut_hap1
+    #   mut_hap2:             仅 Mut_hap2
+    #   mut_hap1_hap2_mean:   (Mut_hap1 + Mut_hap2) / 2
+    #   mut_hap1_hap2_concat: concat(Mut_hap1, Mut_hap2)  注意：维度翻倍
+    #   mut_mean_minus_wt_ref: (Mut_hap1+Mut_hap2)/2 - WT_ref
+    #   mut_concat_minus_wt_ref: concat(Mut_hap1-WT_ref, Mut_hap2-WT_ref)  注意：维度翻倍
+    emb_representation: str = "mut_hap1"
     # 是否标准化特征
     standardize: bool = True
     # 缺失值填充策略（已废弃，统一使用PreprocessConfig）

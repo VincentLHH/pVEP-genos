@@ -263,8 +263,8 @@ class TestModelsWithMonk:
     def test_param_grid_svm(self):
         hp = HyperparamConfig()
         grid = get_param_grid("svm", hp.__dict__)
-        # C(4) * kernel(2) * gamma(2) = 16
-        assert len(grid) == 16
+        # C(5) * kernel(2) * gamma(2) = 20
+        assert len(grid) == 20
         assert all("C" in g and "kernel" in g and "gamma" in g for g in grid)
 
     def test_param_grid_unknown_model(self):

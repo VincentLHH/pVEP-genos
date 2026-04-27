@@ -236,10 +236,17 @@ class MLTrainer:
             print(f"CV分数: {results['mean_score']:.4f} (+/- {results['std_score']:.4f})")
             print(f"最佳参数: {best_params}")
 
-        # 使用全部数据训练最终模型
+        # 使用全部数据训练最终模型（独立 preprocessor 实例，避免 CV 状态残留）
         if self._preprocessor is not None:
-            self._preprocessor.fit(X, feature_names=feature_names)
-            X_proc = self._preprocessor.transform(X)
+            from .preprocessor import MultiOmicsPreprocessor
+            final_preprocessor = MultiOmicsPreprocessor(
+                emb_n_components=self.preprocess_cfg.emb_n_components,
+                emb_standardize_first=self.preprocess_cfg.emb_standardize_first,
+                tab_strategy=self.preprocess_cfg.tab_impute_strategy,
+                random_state=self.random_state,
+            )
+            final_preprocessor.fit(X, feature_names=feature_names)
+            X_proc = final_preprocessor.transform(X)
         else:
             X_proc = X
 

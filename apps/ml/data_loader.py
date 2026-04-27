@@ -206,15 +206,16 @@ class MultiOmicsDataLoader:
                 data = json.load(f)
 
             embeddings_data = data.get("embeddings", {})
-            variant_data: list = []  # [(emb_dict, mut_hap1_vec), ...]
+            rep_strategy = getattr(self.cfg, "emb_representation", "mut_hap1")
+            variant_data: list = []  # [(emb_dict, rep_vec), ...]
             for var_id, models_dict in embeddings_data.items():
                 if not models_dict:
                     continue
                 emb = next(iter(models_dict.values()))
-                mut_hap1 = emb.get("Mut_hap1", [])
-                if not mut_hap1:
+                rep_vec = self._build_rep_vector(emb, rep_strategy)
+                if rep_vec is None:
                     continue
-                variant_data.append((emb, np.asarray(mut_hap1, dtype=float)))
+                variant_data.append((emb, rep_vec))
 
             if not variant_data:
                 warnings.warn(f"样本 {sample_id} 无有效embedding")
@@ -372,6 +373,56 @@ class MultiOmicsDataLoader:
         sim1 = MultiOmicsDataLoader._cosine_sim(dh1, dref)
         sim2 = MultiOmicsDataLoader._cosine_sim(dh2, dref)
         return -(sim1 + sim2) / 2.0
+
+    @staticmethod
+    def _build_rep_vector(emb_dict: dict, strategy: str):
+        """根据表示策略构建变异 embedding 向量。
+
+        策略：
+          mut_hap1:             仅 Mut_hap1
+          mut_hap2:             仅 Mut_hap2
+          mut_hap1_hap2_mean:   (Mut_hap1 + Mut_hap2) / 2
+          mut_hap1_hap2_concat: concat(Mut_hap1, Mut_hap2)
+          mut_mean_minus_wt_ref: (Mut_hap1 + Mut_hap2) / 2 - WT_ref
+          mut_concat_minus_wt_ref: concat(Mut_hap1 - WT_ref, Mut_hap2 - WT_ref)
+        """
+        mh1 = np.asarray(emb_dict.get("Mut_hap1", []), dtype=float)
+        if len(mh1) == 0:
+            return None
+
+        if strategy == "mut_hap1":
+            return mh1
+
+        mh2 = np.asarray(emb_dict.get("Mut_hap2", []), dtype=float)
+        wt_ref = np.asarray(emb_dict.get("WT_ref", []), dtype=float)
+
+        if strategy == "mut_hap2":
+            return mh2 if len(mh2) == len(mh1) else mh1
+
+        has_mh2 = len(mh2) == len(mh1)
+        has_wt = len(wt_ref) == len(mh1)
+
+        if strategy == "mut_hap1_hap2_mean":
+            if not has_mh2:
+                return mh1
+            return (mh1 + mh2) / 2.0
+
+        if strategy == "mut_hap1_hap2_concat":
+            if not has_mh2:
+                return mh1
+            return np.hstack([mh1, mh2])
+
+        if strategy == "mut_mean_minus_wt_ref":
+            mean_vec = (mh1 + mh2) / 2.0 if has_mh2 else mh1
+            return mean_vec - wt_ref if has_wt else mean_vec
+
+        if strategy == "mut_concat_minus_wt_ref":
+            left = mh1 - wt_ref if has_wt else mh1
+            right = mh2 - wt_ref if has_wt and has_mh2 else (mh2 if has_mh2 else mh1)
+            return np.hstack([left, right])
+
+        # 未知策略 → fallback
+        return mh1
 
     @staticmethod
     def _score_absolute(dh1, dh2):
