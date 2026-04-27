@@ -89,7 +89,7 @@ class CVConfig:
 class HyperparamConfig:
     """超参搜索空间"""
     svm: Dict = field(default_factory=lambda: {
-        "C": [0.01, 0.1, 1.0, 10.0],
+        "C": [0.001, 0.01, 0.1, 1.0, 10.0],
         "kernel": ["linear", "rbf"],
         "gamma": ["scale", "auto"],
     })
@@ -107,12 +107,13 @@ class HyperparamConfig:
         "colsample_bytree": [0.8, 1.0],
     })
     mlp: Dict = field(default_factory=lambda: {
-        "hidden_layer_sizes": [[128], [256], [128, 64], [256, 128]],
-        "activation": ["relu"],
-        "alpha": [0.0001, 0.001],
-        "dropout": [0.0, 0.3, 0.5],
-        "max_iter": [500],
+        "hidden_layer_sizes": [[8], [16], [32], [16, 8]],
+        "activation": ["relu", "tanh"],
+        "alpha": [0.001, 0.01, 0.1, 1.0],
+        "max_iter": [2000],
         "early_stopping": [True],
+        "validation_fraction": [0.2],
+        "n_iter_no_change": [20],
     })
 
 

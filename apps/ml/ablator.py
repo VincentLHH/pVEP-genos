@@ -32,13 +32,13 @@ MODULE_MAPPING = {
 
 # 人类可读的模态名称
 MODULE_DISPLAY_NAMES = {
-    "genome_only": "基因组 (Embedding)",
-    "metab_only": "代谢组",
-    "pheno_only": "表型组",
-    "genome+metab": "基因组 + 代谢组",
-    "genome+pheno": "基因组 + 表型组",
-    "metab+pheno": "代谢组 + 表型组",
-    "all": "全模态",
+    "genome_only": "Genome (Embedding)",
+    "metab_only": "Metabolome",
+    "pheno_only": "Phenome",
+    "genome+metab": "Genome + Metabolome",
+    "genome+pheno": "Genome + Phenome",
+    "metab+pheno": "Metabolome + Phenome",
+    "all": "All Modalities",
 }
 
 
@@ -115,7 +115,7 @@ class AblationStudy:
         for module in modules:
             if verbose:
                 print(f"\n{'#'*60}")
-                print(f"消融模块: {MODULE_DISPLAY_NAMES.get(module, module)}")
+                print(f"Ablation module: {MODULE_DISPLAY_NAMES.get(module, module)}")
                 print(f"{'#'*60}")
 
             # 加载对应模态的数据
@@ -124,7 +124,7 @@ class AblationStudy:
                 X, y, feature_names, sample_ids = data_loader.load_subset(modules_list)
             except Exception as e:
                 if verbose:
-                    print(f"  ⚠️ 数据加载失败: {e}")
+                    print(f"  Data load failed: {e}")
                 continue
 
             if verbose:
@@ -191,20 +191,20 @@ class AblationStudy:
         summary = self.get_summary_table()
         summary_file = save_dir / "ablation_summary.csv"
         summary.to_csv(summary_file, index=False)
-        print(f"\n汇总表已保存: {summary_file}")
+        print(f"\nSummary table saved: {summary_file}")
 
         # 保存最佳配置
         if self.best_overall:
             best_file = save_dir / "best_config.json"
             with open(best_file, "w") as f:
                 json.dump(self.best_overall, f, indent=2)
-            print(f"最佳配置已保存: {best_file}")
+            print(f"Best config saved: {best_file}")
 
         # 保存完整结果
         full_results_file = save_dir / "full_ablation_results.json"
         with open(full_results_file, "w") as f:
             json.dump(self.results, f, indent=2, default=str)
-        print(f"完整结果已保存: {full_results_file}")
+        print(f"Full results saved: {full_results_file}")
 
     def get_summary_table(self) -> pd.DataFrame:
         """
@@ -233,22 +233,22 @@ class AblationStudy:
     def print_summary(self):
         """打印消融实验摘要"""
         if not self.results:
-            print("无消融实验结果")
+            print("No ablation study results")
             return
 
         print(f"\n{'='*80}")
-        print("消融实验结果汇总")
+        print("Ablation Study Results Summary")
         print(f"{'='*80}")
 
         summary = self.get_summary_table()
         print(summary.to_string(index=False))
 
         if self.best_overall:
-            print(f"\n🏆 最佳组合:")
-            print(f"   模态: {MODULE_DISPLAY_NAMES.get(self.best_overall['module'], self.best_overall['module'])}")
-            print(f"   模型: {self.best_overall['model']}")
-            print(f"   CV分数: {self.best_overall['score']:.4f}")
-            print(f"   参数: {self.best_overall['params']}")
+            print(f"\n🏆 Best combination:")
+            print(f"   Modality: {MODULE_DISPLAY_NAMES.get(self.best_overall['module'], self.best_overall['module'])}")
+            print(f"   Model: {self.best_overall['model']}")
+            print(f"   CV score: {self.best_overall['score']:.4f}")
+            print(f"   Params: {self.best_overall['params']}")
 
         print(f"{'='*80}")
 
@@ -295,7 +295,7 @@ class AblationStudy:
         ax1 = axes[0]
         ax1.barh(module_df["module"], module_df["best_cv_score"])
         ax1.set_xlabel("Best CV Score (ROC-AUC)")
-        ax1.set_title("按模态对比")
+        ax1.set_title("Performance by Modality")
         ax1.invert_yaxis()
 
         # 图2：热力图（模态 x 模型）
@@ -319,14 +319,14 @@ class AblationStudy:
             ax2.set_xticklabels(models, rotation=45)
             ax2.set_yticks(range(len(modules)))
             ax2.set_yticklabels([MODULE_DISPLAY_NAMES.get(m, m) for m in modules])
-            ax2.set_title("模态 x 模型 性能热力图")
+            ax2.set_title("Modality x Model Performance Heatmap")
             plt.colorbar(im, ax=ax2, label="CV Score")
 
         plt.tight_layout()
 
         if save_path:
             plt.savefig(save_path, dpi=150, bbox_inches="tight")
-            print(f"图表已保存: {save_path}")
+            print(f"Chart saved: {save_path}")
         else:
             plt.show()
 
