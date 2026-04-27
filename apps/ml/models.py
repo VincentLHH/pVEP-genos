@@ -167,8 +167,8 @@ def create_model(model_name: str, random_state: int = 42, **model_params) -> Sta
         mlp_params = {k: v for k, v in model_params.items() if k in _MLP_PARAMS}
 
         # dropout 不是 sklearn 原生参数，转换为 alpha 正则化
-        if "dropout" in model_params:
-            dropout = model_params["dropout"]
+        if "dropout" in mlp_params:
+            dropout = mlp_params.pop("dropout")
             if dropout > 0:
                 mlp_params["alpha"] = max(mlp_params.get("alpha", 0.0001), dropout * 0.1)
 
