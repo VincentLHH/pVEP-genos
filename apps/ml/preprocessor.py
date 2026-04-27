@@ -43,13 +43,19 @@ class EmbeddingReducer(BaseEstimator, TransformerMixin):
     注意：只使用训练集的 PCA 参数，确保无数据泄露。
     """
 
-    def __init__(self, n_components="auto", standardize_first=True):
+    def __init__(self, n_components="auto", standardize_first=True, random_state=42):
         self.n_components = n_components
         self.standardize_first = standardize_first
+        self.random_state = random_state
 
     def fit(self, X, y=None):
         X = np.asarray(X)
         n_samples, n_features = X.shape
+
+        # NaN 填充：embedding 不应有缺失，若出现则填 0（保守选择）
+        self.nan_mask_ = np.isnan(X)
+        if self.nan_mask_.any():
+            X = np.nan_to_num(X, nan=0.0)
 
         # 确定目标维度
         if self.n_components == "auto":
@@ -66,7 +72,7 @@ class EmbeddingReducer(BaseEstimator, TransformerMixin):
             X_scaled = X
 
         # PCA
-        self.pca_ = PCA(n_components=self.n_components_, random_state=42)
+        self.pca_ = PCA(n_components=self.n_components_, random_state=self.random_state)
         self.pca_.fit(X_scaled)
 
         # 保存统计量
@@ -77,6 +83,8 @@ class EmbeddingReducer(BaseEstimator, TransformerMixin):
 
     def transform(self, X):
         X = np.asarray(X)
+        # 填 NaN 为 0（与 fit 阶段一致）
+        X = np.nan_to_num(X, nan=0.0)
 
         if self.standardize_first and self.scaler_ is not None:
             X_scaled = self.scaler_.transform(X)
@@ -203,6 +211,7 @@ class MultiOmicsPreprocessor:
         tab_strategy="median",
         emb_feature_indices=None,
         tab_feature_indices=None,
+        random_state=42,
     ):
         """
         Args:
@@ -211,12 +220,14 @@ class MultiOmicsPreprocessor:
             tab_strategy: 表格数据填补策略 (median/mean/most_frequent/zero)
             emb_feature_indices: genome特征列索引 (None则根据feature_names推断)
             tab_feature_indices: 表格特征列索引
+            random_state: 随机种子，传递给 PCA 等随机组件
         """
         self.emb_n_components = emb_n_components
         self.emb_standardize_first = emb_standardize_first
         self.tab_strategy = tab_strategy
         self.emb_feature_indices = emb_feature_indices
         self.tab_feature_indices = tab_feature_indices
+        self.random_state = random_state
 
     def fit(self, X, feature_names=None):
         """
@@ -272,6 +283,7 @@ class MultiOmicsPreprocessor:
                 EmbeddingReducer(
                     n_components=self.emb_n_components,
                     standardize_first=self.emb_standardize_first,
+                    random_state=self.random_state,
                 ),
             )
         else:

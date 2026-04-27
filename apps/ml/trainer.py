@@ -81,6 +81,7 @@ class MLTrainer:
                 emb_n_components=self.preprocess_cfg.emb_n_components,
                 emb_standardize_first=self.preprocess_cfg.emb_standardize_first,
                 tab_strategy=self.preprocess_cfg.tab_impute_strategy,
+                random_state=self.random_state,
             )
 
         return self._preprocessor

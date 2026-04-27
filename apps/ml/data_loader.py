@@ -69,9 +69,6 @@ class MultiOmicsDataLoader:
         X = self._assemble_features()
         feature_names = self._build_feature_names()
 
-        # 处理缺失值
-        X = self._fill_na(X)
-
         return X, self._labels.values, feature_names, self._sample_ids
 
     def load_all_with_metadata(self) -> Dict:
@@ -121,7 +118,6 @@ class MultiOmicsDataLoader:
         self.load_all()
         X = self._assemble_features(modules)
         feature_names = self._build_feature_names(modules)
-        X = self._fill_na(X)
         return X, self._labels.values, feature_names, self._sample_ids
 
     # ------------------------------------------------------------------
