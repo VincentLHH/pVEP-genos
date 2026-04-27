@@ -70,12 +70,7 @@ class MLTrainer:
         # 初始化预处理器（延迟）
         self._preprocessor = None
 
-    def _get_preprocessor(self, X):
-        """
-        获取或创建预处理器。
-
-        使用延迟初始化，确保在CV fold内正确fit。
-        """
+    def _get_preprocessor(self):
         if self.preprocess_cfg is None or not self.preprocess_cfg.enabled:
             return None
 
@@ -90,23 +85,13 @@ class MLTrainer:
 
         return self._preprocessor
 
-    def _preprocess_fold(self, X_train, X_val, X_test=None):
-        """
-        在单个CV fold内进行预处理。
-
-        关键：只使用X_train fit预处理器，然后transform所有数据。
-
-        Returns:
-            (X_train_proc, X_val_proc) 或 (X_train_proc, X_val_proc, X_test_proc)
-        """
-        preprocessor = self._get_preprocessor(X_train)
+    def _preprocess_fold(self, X_train, X_val, X_test=None, feature_names=None):
+        preprocessor = self._get_preprocessor()
         if preprocessor is None:
             return (X_train, X_val) if X_test is None else (X_train, X_val, X_test)
 
-        # 在训练集上fit
-        preprocessor.fit(X_train)
+        preprocessor.fit(X_train, feature_names=feature_names)
 
-        # Transform所有
         X_train_proc = preprocessor.transform(X_train)
         X_val_proc = preprocessor.transform(X_val)
 
@@ -124,6 +109,7 @@ class MLTrainer:
         param_grid: Optional[List[Dict]] = None,
         scoring: str = "roc_auc",
         verbose: int = 1,
+        feature_names: Optional[List[str]] = None,
     ) -> Dict:
         """
         交叉验证评估。
@@ -173,8 +159,9 @@ class MLTrainer:
             X_train, X_val = X[train_idx], X[val_idx]
             y_train, y_val = y[train_idx], y[val_idx]
 
-            # 在fold内预处理
-            X_train_proc, X_val_proc = self._preprocess_fold(X_train, X_val)
+            # 在fold内预处理（仅首 fold 用 feature_names 推断列索引）
+            X_train_proc, X_val_proc = self._preprocess_fold(
+                X_train, X_val, feature_names=feature_names)
             results["n_features"] = X_train_proc.shape[1]  # 更新处理后特征数
 
             if param_grid and len(param_grid) > 1:
@@ -188,7 +175,6 @@ class MLTrainer:
                     model.fit(X_train_proc, y_train)
 
                     if scoring == "roc_auc":
-                        from sklearn.metrics import roc_auc_score
                         score = roc_auc_score(y_val, model.predict_proba(X_val_proc)[:, 1])
                     else:
                         score = model.score(X_val_proc, y_val)
@@ -218,7 +204,6 @@ class MLTrainer:
                 model.fit(X_train_proc, y_train)
 
                 if scoring == "roc_auc":
-                    from sklearn.metrics import roc_auc_score
                     fold_score = roc_auc_score(y_val, model.predict_proba(X_val_proc)[:, 1])
                 else:
                     fold_score = model.score(X_val_proc, y_val)
@@ -307,26 +292,14 @@ class MLTrainer:
         param_grids: Optional[Dict[str, List[Dict]]] = None,
         scoring: str = "roc_auc",
         verbose: int = 1,
+        feature_names: Optional[List[str]] = None,
     ) -> Dict[str, Dict]:
-        """
-        评估所有模型。
-
-        Args:
-            X: 特征矩阵
-            y: 标签向量
-            model_names: 要评估的模型列表（None则评估全部）
-            param_grids: 各模型的超参网格
-            scoring: 评分指标
-
-        Returns:
-            {model_name: results} 字典
-        """
         if model_names is None:
             model_names = AVAILABLE_MODELS
         if param_grids is None:
             param_grids = {}
 
-        all_results = {}
+        all_results: Dict[str, Dict] = {}
 
         for model_name in model_names:
             if param_grids and model_name in param_grids:
@@ -338,6 +311,7 @@ class MLTrainer:
                 param_grid=param_grid,
                 scoring=scoring,
                 verbose=verbose,
+                feature_names=feature_names,
             )
             all_results[model_name] = results
 

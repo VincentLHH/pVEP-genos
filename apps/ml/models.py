@@ -94,39 +94,58 @@ def create_model(model_name: str, random_state: int = 42, **model_params) -> Sta
     Returns:
         StandardizableModel 封装实例
     """
+    _SVC_PARAMS = {
+        "C", "kernel", "degree", "gamma", "coef0", "shrinking", "probability",
+        "tol", "cache_size", "class_weight", "verbose", "max_iter",
+        "decision_function_shape", "break_ties", "random_state",
+    }
+    _LR_PARAMS = {
+        "C", "penalty", "dual", "tol", "fit_intercept", "intercept_scaling",
+        "class_weight", "solver", "max_iter", "multi_class", "verbose",
+        "warm_start", "n_jobs", "l1_ratio", "random_state",
+    }
+    _XGB_PARAMS = {
+        "n_estimators", "max_depth", "max_leaves", "learning_rate",
+        "subsample", "colsample_bytree", "colsample_bylevel", "colsample_bynode",
+        "min_child_weight", "gamma", "reg_alpha", "reg_lambda",
+        "scale_pos_weight", "objective", "eval_metric",
+    }
+
     if model_name == "svm":
+        extra = set(model_params) - _SVC_PARAMS
+        if extra:
+            import warnings
+            warnings.warn(f"SVC ignoring unknown params: {extra}")
         model = SVC(
-            probability=True,  # 开启概率输出
+            probability=True,
             random_state=random_state,
-            **{k: v for k, v in model_params.items() if k in [
-                "C", "kernel", "degree", "gamma", "coef0", "shrinking"
-            ]}
+            **{k: v for k, v in model_params.items() if k in _SVC_PARAMS},
         )
         return StandardizableModel(model, need_scaling=True)
 
     elif model_name == "logistic_regression":
+        extra = set(model_params) - _LR_PARAMS
+        if extra:
+            import warnings
+            warnings.warn(f"LogisticRegression ignoring unknown params: {extra}")
         model = LogisticRegression(
             random_state=random_state,
-            **{k: v for k, v in model_params.items() if k in [
-                "C", "penalty", "solver", "max_iter", "dual"
-            ]}
+            **{k: v for k, v in model_params.items() if k in _LR_PARAMS},
         )
         return StandardizableModel(model, need_scaling=True)
 
     elif model_name == "xgboost":
         if not HAS_XGBOOST:
             raise ImportError("XGBoost未安装。请运行: pip install xgboost")
-
+        extra = set(model_params) - _XGB_PARAMS
+        if extra:
+            import warnings
+            warnings.warn(f"XGBoost ignoring unknown params: {extra}")
         params = {
             "objective": "binary:logistic",
             "eval_metric": "logloss",
-            "use_label_encoder": False,
             "random_state": random_state,
-            **{k: v for k, v in model_params.items() if k in [
-                "n_estimators", "max_depth", "learning_rate", "subsample",
-                "colsample_bytree", "min_child_weight", "gamma", "reg_alpha",
-                "reg_lambda", "scale_pos_weight"
-            ]}
+            **{k: v for k, v in model_params.items() if k in _XGB_PARAMS},
         }
         model = xgb.XGBClassifier(**params)
         return StandardizableModel(model, need_scaling=False)

@@ -21,7 +21,7 @@ import pandas as pd
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.decomposition import PCA
 from sklearn.impute import SimpleImputer
-from sklearn.pipeline import Pipeline
+from sklearn.pipeline import Pipeline, make_pipeline
 from sklearn.preprocessing import StandardScaler
 
 
@@ -266,9 +266,6 @@ class MultiOmicsPreprocessor:
             ]
 
     def _build_pipeline(self):
-        """构建内部pipeline"""
-        from sklearn.pipeline import make_pipeline
-
         # genome embedding -> 降维
         if self.emb_feature_indices:
             self.emb_pipeline_ = make_pipeline(

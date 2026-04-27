@@ -145,6 +145,7 @@ class AblationStudy:
                 param_grids=self.hyperparam_cfg.__dict__,
                 scoring=scoring,
                 verbose=verbose,
+                feature_names=feature_names,
             )
 
             # 保存结果
