@@ -199,11 +199,9 @@ python run_pipeline.py --config config/default.yaml
 输出结构：
 ```
 outputs/
-├── sample1/
-│   ├── embeddings.json      # embedding 结果
-│   └── haplotypes.json      # 重建的单倍型序列（save_haplotypes=true 时）
-├── sample2/
-│   └── ...
+├── sample1.json              # 每个样本一个 JSON 文件
+├── sample2.json
+└── ...
 ```
 
 ---
@@ -339,57 +337,52 @@ python run_pipeline.py --config config/default.yaml \
 
 ## 输出格式
 
-### embeddings.json
+每个样本输出一个 `{sample_id}.json` 文件，结构如下：
 
 ```json
 {
-  "metadata": {
-    "model": "Genos-1.2B",
-    "window_size": 128,
-    "methods": ["mean", "max"],
-    "dtype": "float32",
-    "created_at": "2026-04-23T10:00:00"
+  "sample_id": "sample1",
+  "haplotypes": {
+    "chr1_55016418_G_A": {
+      "upstream": {
+        "hap1": { "mut": "ACGT...", "wt": "ACGT...", "wt_is_alias": false },
+        "hap2": { "mut": "ACGT...", "wt": "ACGT...", "wt_is_alias": false },
+        "ref": { "mut": "ACGT...", "wt": "ACGT...", "wt_is_alias": false }
+      },
+      "downstream": {
+        "hap1": { "mut": "ACGT...", "wt": "ACGT...", "wt_is_alias": false },
+        "hap2": { "mut": "ACGT...", "wt": "ACGT...", "wt_is_alias": false },
+        "ref": { "mut": "ACGT...", "wt": "ACGT...", "wt_is_alias": false }
+      }
+    }
   },
-  "results": [
-    {
-      "sample": "sample1",
-      "region": "chr1:100000-100200",
-      "variants": [
-        {
-          "var_id": "chr1_101_T_C",
-          "pos": 101,
-          "ref": "T",
-          "alt": "C",
-          "gt": "1|0",
-          "hap1_mut_seq": "...",
-          "hap2_mut_seq": "...",
-          "embeddings": {
-            "mean": [0.123, -0.456, ...],
-            "max": [0.789, 0.012, ...]
-          }
-        }
-      ]
+  "embeddings": {
+    "chr1_55016418_G_A": {
+      "Genos-1.2B": {
+        "Mut_hap1": [0.123, -0.456, ...],
+        "WT_hap1": [0.789, 0.012, ...],
+        "Mut_hap2": [0.234, -0.567, ...],
+        "WT_hap2": [0.890, 0.123, ...],
+        "Mut_ref": [0.345, -0.678, ...],
+        "WT_ref": [0.901, 0.234, ...]
+      }
     }
-  ]
+  }
 }
 ```
 
-### haplotypes.json（可选）
+**字段说明：**
 
-```json
-{
-  "sample": "sample1",
-  "region": "chr1:100000-100200",
-  "variants": [
-    {
-      "var_id": "chr1_101_T_C",
-      "gt": "1|0",
-      "hap1_mut_seq": "ACGTTGCAT...",   // hap1 的重建序列（ALT）
-      "hap2_mut_seq": "ACGTTGCAT..."    // hap2 的重建序列（REF）
-    }
-  ]
-}
-```
+| 字段 | 说明 |
+|------|------|
+| `sample_id` | 样本标识 |
+| `haplotypes` | 重建的单倍型序列（`save_haplotypes=true` 时存在） |
+| `haplotypes.{var_id}.upstream/downstream` | 上游/下游方向的序列 |
+| `haplotypes.{var_id}.*.hap1/hap2` | 两条单倍型的 Mut/WT 序列 |
+| `haplotypes.{var_id}.*.ref` | 参考基因组背景的 Mut/WT 序列 |
+| `haplotypes.{var_id}.*.wt_is_alias` | WT 是否与 Mut 等价（基因型为 hom-ref 时为 true） |
+| `embeddings` | Embedding 结果（`save_embeddings=true` 时存在） |
+| `embeddings.{var_id}.{model_name}.Mut_hap1` ~ `WT_ref` | 6 个 embedding 向量，每个维度为 hidden_size × 2 |
 
 ---
 
@@ -570,133 +563,170 @@ curl -X DELETE http://localhost:8000/cache
 
 ## ML应用模块
 
-利用基因组embedding + 代谢组 + 表型组进行下游分类任务。
+基于变异 embedding 和多组学表格数据的分类模型训练、评估与消融分析。
+
+### 核心设计
+
+- **变异显著性评分**：基于余弦距离的相对扰动分数，按变异对表型的影响程度排序
+- **Top-k 选择**：每个样本选取最具显著性的 k 个变异，避免无关变异噪音
+- **防数据泄露**：所有预处理（填补、标准化、PCA）仅在每折训练集上拟合
+- **可扩展深度模型**：`BaseClassifier` 抽象基类 + `TorchClassifier` 骨架，可无痛接入 PyTorch 模型
 
 ### 目录结构
 
 ```
 apps/
-├── ml/                        # 🤖 机器学习模块
-│   ├── config.py              # 配置管理
-│   ├── data_loader.py         # 多组学数据加载
-│   ├── models.py              # 模型定义 (SVM/LR/XGBoost/MLP)
-│   ├── trainer.py              # 交叉验证 + 超参搜索
-│   ├── evaluator.py           # 评估指标
-│   ├── ablato.py             # 消融实验
-│   └── run_ml.py              # 主入口
+├── main.py                 # 入口（python -m apps.main）
+├── config.yaml             # 配置文件
+├── utils.py                # 日志、种子、配置解析
+├── data/
+│   ├── loader.py           # 加载 emb 和表格数据
+│   └── preprocess.py       # 预处理（防泄露 pipeline）
+├── features/
+│   ├── variant_scoring.py  # 变异评分策略 + Top-k 选择
+│   └── aggregation.py      # 聚合和降维
+├── models/
+│   ├── classifiers.py      # BaseClassifier + sklearn/Torch 适配器 + 工厂
+│   └── trainer.py          # 交叉验证、超参搜索
+├── evaluation/
+│   ├── metrics.py          # 指标计算（AUROC, F1, etc.）
+│   └── visualize.py        # 绘图函数
 └── configs/
-    └── default_ml.yaml        # 默认配置
+    └── default_ml.yaml     # 旧版配置（兼容）
 ```
 
-### 数据整合
+### 数据流
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                      Sample                                  │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────┐   │
-│  │  基因组  │  │  代谢组  │  │  表型组  │  │  分类标签 │   │
-│  │ (emb)    │  │ (表格)    │  │ (表格)   │  │ (y)      │   │
-│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬─────┘   │
-│       │             │             │             │          │
-│       ▼             ▼             ▼             ▼          │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │              Multi-omics Feature Matrix              │   │
-│  │   [emb_1...emb_n] + [metab_feat] + [pheno_feat]     │   │
-│  └─────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────┘
+Emb 文件 (JSON/HDF5)  ──▶  变异评分 (cosine distance)  ──▶  Top-k 选择
+                                                                    │
+                                                                    ▼
+表格数据 (CSV/TSV)    ──▶  预处理 (填补+标准化)         ◀──  聚合 (concat+mean)
+                                                                    │
+                                                                    ▼
+标签 (CSV)            ──▶  对齐样本  ──▶  特征矩阵 X, 标签 y  ──▶  模型训练
+                                                                    │
+                                                                    ▼
+                                                            评估 + 可视化 + 消融
 ```
 
-### 消融实验设计
+### 变异评分方法
 
-| 模块 | 说明 |
-|------|------|
-| `genome_only` | 只有基因组embedding |
-| `genome+metab` | 基因组 + 代谢组 |
-| `genome+pheno` | 基因组 + 表型组 |
-| `metab+pheno` | 代谢组 + 表型组 |
-| `all` | 全部模态 |
+默认方法（相对扰动分数）：
+
+```
+for each variant:
+    dist_hap1 = cosine_distance(Mut_hap1, WT_hap1)
+    dist_hap2 = cosine_distance(Mut_hap2, WT_hap2)
+    dist_ref  = cosine_distance(Mut_ref, WT_ref)
+    score = (dist_hap1/dist_ref + dist_hap2/dist_ref) / 2
+```
+
+可选策略：`relative`（默认）、`sum`（距离和）、`max`（最大距离）、`hap1_only`。
+
+### 消融实验特征组
+
+| 特征组 | 说明 |
+|--------|------|
+| `emb` | 仅变异 embedding（降维后） |
+| `table` | 仅表格特征 |
+| `metabolomics` | 仅代谢组列（按前缀筛选） |
+| `phenotype` | 仅表型组列（按前缀筛选） |
+| `full` | emb + 全部表格 |
+| `emb_no_background` | 仅 Mut_ref/WT_ref embedding |
 
 ### 快速开始
 
 ```bash
-# 1. 配置（编辑 apps/configs/default_ml.yaml）
-vim apps/configs/default_ml.yaml
+# 1. 配置（编辑 apps/config.yaml）
+vim apps/config.yaml
 
-# 2. 完整运行（超参搜索 + 消融实验）
-python apps/ml/run_ml.py --config apps/configs/default_ml.yaml
+# 2. 完整运行
+python -m apps.main --config apps/config.yaml
 
-# 3. 只跑消融实验（跳过超参搜索）
-python apps/ml/run_ml.py --config apps/configs/default_ml.yaml \
-    --no-hyperparam-search
+# 3. 只跑消融实验
+python -m apps.main --config apps/config.yaml --ablation-only
 
-# 4. 只测试单个模态和模型
-python apps/ml/run_ml.py --config apps/configs/default_ml.yaml \
-    --modules genome_only --models xgboost
+# 4. 指定模型
+python -m apps.main --config apps/config.yaml --models lr xgb
+
+# 5. 跳过超参搜索
+python -m apps.main --config apps/config.yaml --no-hyperparam-search
 ```
 
 ### 配置文件示例
 
 ```yaml
-# apps/configs/default_ml.yaml
+# apps/config.yaml
 
 # 数据源
-data:
-  emb_dir: "/path/to/embeddings"     # embedding输出目录
-  metab_file: "/path/to/metabolomics.csv"  # 代谢组CSV
-  pheno_file: "/path/to/phenotypes.csv"    # 表型组CSV
-  label_file: "/path/to/labels.csv"        # 分类标签CSV
-  sample_id_col: "sample_id"
-  label_col: "label"
-  emb_aggregation: "mean"              # mean/max
-  standardize: true
+emb_path: "/path/to/embeddings"       # emb 目录（包含 {sample_id}.json 文件）或 HDF5 文件
+table_path: "/path/to/metadata.csv"   # 表格数据（含标签）
+sample_id_col: "sample_id"
+label_col: "label"
+metabolomics_prefix: "metab_"
+phenotype_prefix: "pheno_"
+
+# 变异评分与选择
+top_k: 10
+score_method: "relative"              # relative / sum / max / hap1_only
+variant_merge: "concat"               # concat / sum / mean
+pooling: "mean"                       # mean / max / sum
+
+# 预处理
+pca_dim: 0                            # 0 不降维
+impute_strategy: "median"
 
 # 交叉验证
 cv:
   n_folds: 5
   stratified: true
-  random_state: 42
+  shuffle: true
 
-# 超参搜索
-hyperparam:
-  svm:
-    C: [0.01, 0.1, 1.0, 10.0]
-    kernel: [linear, rbf]
-  xgboost:
-    n_estimators: [50, 100, 200]
-    max_depth: [3, 5, 7]
+# 分类器
+classifiers: [lr, svm, rf, xgb, mlp]
 
 # 消融实验
 ablation:
-  modules: [genome_only, genome+metab, genome+pheno, all]
-  save_dir: "outputs/ablation"
+  feature_groups: [emb, table, full]
+  model: "xgb"
 
 # 全局
 random_state: 42
-n_jobs: -1
-```
-
-### 输出说明
-
-```
-outputs/
-├── ml/
-│   ├── best_config.json              # 最佳模型配置
-│   ├── all_svm_cv_results.json       # 各实验CV结果
-│   ├── all_xgboost_params.json       # 最佳参数
-│   └── ...
-└── ablation/
-    ├── ablation_summary.csv          # 消融汇总表
-    ├── best_config.json              # 消融最佳配置
-    ├── full_ablation_results.json    # 完整结果
-    ├── ablation_comparison.png       # 对比图
-    └── genome_only_svm_cv_results.json
+output_dir: "outputs/ml"
 ```
 
 ### 模型支持
 
-| 模型 | 说明 | 特点 |
+| 模型 | 类型 | 说明 |
 |------|------|------|
-| `svm` | 支持向量机 | 适合高维小样本 |
-| `logistic_regression` | 逻辑回归 | 可解释性强 |
-| `xgboost` | 梯度提升树 | 性能强，特征选择 |
-| `mlp` | 多层感知机 | 可捕捉非线性 |
+| `lr` | sklearn | 逻辑回归，可解释性强 |
+| `svm` | sklearn | 支持向量机，适合高维小样本 |
+| `rf` | sklearn | 随机森林，特征重要性 |
+| `xgb` | sklearn | XGBoost，性能强 |
+| `mlp` | sklearn | 多层感知机 |
+| `torch_mlp` | PyTorch | 深度 MLP 骨架（可自定义网络） |
+
+### 输出说明
+
+```
+outputs/ml/
+├── run.log                    # 运行日志
+├── run_config.yaml            # 保存的运行配置
+├── metrics_summary.csv        # 各模型指标汇总
+├── model_comparison.png       # 模型对比柱状图
+├── pca_plot.png               # PCA 散点图
+├── roc_lr.png                 # ROC 曲线（二分类）
+├── ablation.png               # 消融实验条形图
+└── ...
+```
+
+### 测试
+
+```bash
+# 运行 ML 模块测试
+pytest tests/test_ml.py -v
+
+# 运行全部测试
+pytest tests/ -v
+```

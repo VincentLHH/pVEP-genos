@@ -144,26 +144,26 @@ class MultiOmicsDataLoader:
             raise FileNotFoundError(f"Embedding目录不存在: {emb_dir}")
 
         emb_dict = {}
-        for sample_dir in emb_dir.iterdir():
-            if not sample_dir.is_dir():
-                continue
-            emb_file = sample_dir / "embeddings.json"
-            if not emb_file.exists():
-                continue
-
+        for emb_file in sorted(emb_dir.glob("*.json")):
+            sample_id = emb_file.stem
             with open(emb_file) as f:
                 data = json.load(f)
 
-            # 聚合所有region的embedding
+            # 从 embeddings 字段读取，结构: {var_id: {model_name: {Mut_hap1: [...], ...}}}
+            embeddings_data = data.get("embeddings", {})
             all_embs = []
-            for result in data.get("results", []):
-                for var in result.get("variants", []):
-                    emb = var.get("embeddings", {}).get("mean", [])
-                    if emb:
-                        all_embs.append(emb)
+            for var_id, models_dict in embeddings_data.items():
+                # 取第一个模型的 embedding
+                if not models_dict:
+                    continue
+                emb = next(iter(models_dict.values()))
+                # 使用 Mut_hap1 作为代表性向量（与 pipeline 输出的 6 向量一致）
+                mut_hap1 = emb.get("Mut_hap1", [])
+                if mut_hap1:
+                    all_embs.append(mut_hap1)
 
             if not all_embs:
-                warnings.warn(f"样本 {sample_dir.name} 无有效embedding")
+                warnings.warn(f"样本 {sample_id} 无有效embedding")
                 continue
 
             if self.cfg.emb_aggregation == "mean":
@@ -173,7 +173,7 @@ class MultiOmicsDataLoader:
             else:
                 sample_emb = np.mean(all_embs, axis=0)
 
-            emb_dict[sample_dir.name] = sample_emb
+            emb_dict[sample_id] = sample_emb
 
         if not emb_dict:
             raise ValueError("未找到任何有效的embedding数据")
