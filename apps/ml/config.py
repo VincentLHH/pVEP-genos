@@ -15,7 +15,7 @@ import yaml
 @dataclass
 class DataConfig:
     """数据源配置"""
-    # Embedding目录（pipeline输出的embeddings.json所在目录）
+    # Embedding目录（pipeline输出的 {sample_id}.json 所在目录）
     emb_dir: str = ""
     # 代谢组表格（CSV格式，sample_id列 + 代谢物列）
     metab_file: str = ""
@@ -27,7 +27,21 @@ class DataConfig:
     sample_id_col: str = "sample_id"
     # 标签列名
     label_col: str = "label"
-    # Embedding聚合方式：mean（按样本所有region取平均）/ concat（拼接）
+
+    # -- 变异评分与选择 --
+    # 评分策略：
+    #   relative : 背景校正 (cos_sim(diff_hap, diff_ref))
+    #   absolute : 绝对效应 (||diff_hap1|| + ||diff_hap2||)
+    #   weighted : relative + absolute 加权
+    #   cascade  : 先用 absolute 粗筛 λk，再用 relative 精选 k
+    variant_scoring: str = "absolute"
+    # 每个样本选取的 top-k 变异数
+    top_k: int = 0  # 0 = 不选，全量聚合
+    # 策略 weighted 的权重：score = w * norm(relative) + (1-w) * norm(absolute)
+    score_weight: float = 0.5
+    # 策略 cascade 的粗筛倍数 λ
+    cascade_lambda: float = 2.0
+    # top-k 变异 embedding 聚合方式：mean / max
     emb_aggregation: str = "mean"
     # 是否标准化特征
     standardize: bool = True

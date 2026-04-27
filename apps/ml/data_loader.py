@@ -190,12 +190,6 @@ class MultiOmicsDataLoader:
     # ------------------------------------------------------------------
 
     def _load_emb(self, common_ids: pd.Index):
-        """
-        加载基因组embedding，只加载 common_ids 中的样本。
-
-        Args:
-            common_ids: 公共样本ID索引
-        """
         if not self.cfg.emb_dir:
             warnings.warn("emb_dir 未配置，跳过基因组特征")
             self._emb_features = pd.DataFrame(index=common_ids)
@@ -215,36 +209,32 @@ class MultiOmicsDataLoader:
             with open(emb_file) as f:
                 data = json.load(f)
 
-            # 从 embeddings 字段读取，结构: {var_id: {model_name: {Mut_hap1: [...], ...}}}
             embeddings_data = data.get("embeddings", {})
-            all_embs = []
+            variant_data: list = []  # [(emb_dict, mut_hap1_vec), ...]
             for var_id, models_dict in embeddings_data.items():
-                # 取第一个模型的 embedding
                 if not models_dict:
                     continue
                 emb = next(iter(models_dict.values()))
-                # 使用 Mut_hap1 作为代表性向量（与 pipeline 输出的 6 向量一致）
                 mut_hap1 = emb.get("Mut_hap1", [])
-                if mut_hap1:
-                    all_embs.append(mut_hap1)
+                if not mut_hap1:
+                    continue
+                variant_data.append((emb, np.asarray(mut_hap1, dtype=float)))
 
-            if not all_embs:
+            if not variant_data:
                 warnings.warn(f"样本 {sample_id} 无有效embedding")
                 continue
 
-            if self.cfg.emb_aggregation == "mean":
-                sample_emb = np.mean(all_embs, axis=0)
-            elif self.cfg.emb_aggregation == "max":
-                sample_emb = np.max(all_embs, axis=0)
+            top_embs = self._select_top_variants(variant_data)
+            if self.cfg.emb_aggregation == "max":
+                sample_emb = np.max(top_embs, axis=0)
             else:
-                sample_emb = np.mean(all_embs, axis=0)
+                sample_emb = np.mean(top_embs, axis=0)
 
             emb_dict[sample_id] = sample_emb
 
         if not emb_dict:
             raise ValueError("未找到任何有效的embedding数据")
 
-        # 转为DataFrame，按 common_ids 排序对齐
         n_dims = len(next(iter(emb_dict.values())))
         emb_df = pd.DataFrame(
             emb_dict,
@@ -252,7 +242,6 @@ class MultiOmicsDataLoader:
         ).T
         emb_df.index.name = self.cfg.sample_id_col
 
-        # 只保留 common_ids 中的样本
         self._emb_features = emb_df.loc[emb_df.index.isin(common_ids)]
         self._emb_features = self._emb_features.loc[common_ids]
 
@@ -359,6 +348,101 @@ class MultiOmicsDataLoader:
             fill_val = 0.0
 
         return np.nan_to_num(X, nan=fill_val)
+
+    # ------------------------------------------------------------------
+    # 变异评分与 top-k 选择
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _diff_vectors(emb_dict: dict):
+        dh1 = np.asarray(emb_dict.get("Mut_hap1", []), dtype=float) - \
+              np.asarray(emb_dict.get("WT_hap1", []), dtype=float)
+        dh2 = np.asarray(emb_dict.get("Mut_hap2", []), dtype=float) - \
+              np.asarray(emb_dict.get("WT_hap2", []), dtype=float)
+        dref = np.asarray(emb_dict.get("Mut_ref", []), dtype=float) - \
+               np.asarray(emb_dict.get("WT_ref", []), dtype=float)
+        return dh1, dh2, dref
+
+    @staticmethod
+    def _cosine_sim(a, b):
+        na, nb = np.linalg.norm(a), np.linalg.norm(b)
+        if na == 0 or nb == 0:
+            return 0.0
+        return float(np.dot(a, b) / (na * nb))
+
+    @staticmethod
+    def _score_relative(dh1, dh2, dref):
+        """策略1：偏离背景的程度，更高=更不似背景。"""
+        sim1 = MultiOmicsDataLoader._cosine_sim(dh1, dref)
+        sim2 = MultiOmicsDataLoader._cosine_sim(dh2, dref)
+        return -(sim1 + sim2) / 2.0
+
+    @staticmethod
+    def _score_absolute(dh1, dh2):
+        """策略2：变异绝对效应大小。"""
+        return float(np.linalg.norm(dh1) + np.linalg.norm(dh2))
+
+    def _select_top_variants(self, variant_data: list) -> list:
+        """
+        对样本内所有变异评分，选取 top-k 的 Mut_hap1 向量。
+
+        variant_data: [(emb_dict, mut_hap1_vec), ...]
+        返回: top-k 的 mut_hap1 向量列表
+        """
+        top_k = self.cfg.top_k
+        if top_k <= 0 or len(variant_data) <= top_k:
+            return [v[1] for v in variant_data]
+
+        strategy = self.cfg.variant_scoring
+        n = len(variant_data)
+
+        # 预计算两套原始分
+        raw_rel = []
+        raw_abs = []
+        for emb_dict, _ in variant_data:
+            dh1, dh2, dref = self._diff_vectors(emb_dict)
+            raw_rel.append(self._score_relative(dh1, dh2, dref))
+            raw_abs.append(self._score_absolute(dh1, dh2))
+
+        if strategy == "relative":
+            final_scores = raw_rel
+        elif strategy == "absolute":
+            final_scores = raw_abs
+        elif strategy == "weighted":
+            final_scores = self._combine_weighted(raw_rel, raw_abs)
+        elif strategy == "cascade":
+            return self._select_cascade(raw_abs, raw_rel, variant_data, top_k)
+        else:
+            raise ValueError(f"未知 variant_scoring: {strategy!r}")
+
+        # 按最终分降序取 top-k
+        ranked = sorted(enumerate(final_scores), key=lambda x: x[1], reverse=True)
+        top_indices = [i for i, _ in ranked[:top_k]]
+        return [variant_data[i][1] for i in top_indices]
+
+    def _combine_weighted(self, raw_rel, raw_abs):
+        """策略3：min-max 归一化后加权求和。"""
+        rel = np.asarray(raw_rel, dtype=float)
+        abs_ = np.asarray(raw_abs, dtype=float)
+        for arr in (rel, abs_):
+            rng = arr.max() - arr.min()
+            if rng > 0:
+                arr[...] = (arr - arr.min()) / rng
+            else:
+                arr[...] = 0.0
+        w = self.cfg.score_weight
+        return (w * rel + (1 - w) * abs_).tolist()
+
+    def _select_cascade(self, raw_abs, raw_rel, variant_data, top_k):
+        """策略4：先用 absolute 粗筛 λk，再用 relative 精选 k。"""
+        lamb = max(self.cfg.cascade_lambda, 1.0)
+        pool_size = min(int(top_k * lamb), len(variant_data))
+        pool_size = max(pool_size, top_k)
+        ranked_abs = sorted(enumerate(raw_abs), key=lambda x: x[1], reverse=True)
+        pool_indices = [i for i, _ in ranked_abs[:pool_size]]
+        ranked_rel = sorted(pool_indices, key=lambda i: raw_rel[i], reverse=True)
+        top_indices = ranked_rel[:top_k]
+        return [variant_data[i][1] for i in top_indices]
 
 
 def load_and_split(

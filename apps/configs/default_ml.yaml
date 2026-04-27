@@ -23,8 +23,25 @@ data:
   # 列名
   sample_id_col: "sample_id"
   label_col: "label"
-  
-  # Embedding聚合：mean（平均）/ concat（拼接）
+
+  # -- 变异评分与 top-k 选择 --
+  # 评分策略：
+  #   relative : 背景校正 (cos_sim(diff_hap, diff_ref) 取反)
+  #   absolute : 绝对效应 (||diff_hap1|| + ||diff_hap2||)
+  #   weighted : relative + absolute 加权
+  #   cascade  : 先用 absolute 粗筛 λk，再用 relative 精选 k
+  variant_scoring: "absolute"
+
+  # 每个样本选取的 top-k 变异数（0 = 不选，全量聚合）
+  top_k: 0
+
+  # 策略 weighted 的权重：score = w * norm(relative) + (1-w) * norm(absolute)
+  score_weight: 0.5
+
+  # 策略 cascade 的粗筛倍数 λ
+  cascade_lambda: 2.0
+
+  # top-k 变异 embedding 聚合：mean / max
   emb_aggregation: "mean"
 
 # 预处理配置（防止数据泄露的关键）

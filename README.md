@@ -609,15 +609,40 @@ Emb JSON ({sample_id}.json)  ──▶  按样本聚合 (mean/max)  ──▶  g
 
 ### Embedding 聚合方法
 
-每个样本的多个变异 embedding 聚合为固定维度向量：
+流程：**评分 → top-k 筛选 → 聚合**。
+
+#### 1. 变异评分
+
+对每个样本的每个变异，从 pipeline 输出的 6 向量（Mut_hap1, WT_hap1, Mut_hap2, WT_hap2, Mut_ref, WT_ref）中提取差分向量：
 
 ```
-对于样本 s 的每个变异 v_i:
-  取 Mut_hap1 向量（或 WT_hap1 / Mut_hap2 等，由变异的基因型决定）
+diff_hap1 = Mut_hap1 - WT_hap1
+diff_hap2 = Mut_hap2 - WT_hap2
+diff_ref  = Mut_ref  - WT_ref
+```
 
-聚合策略（由 data.emb_aggregation 配置）:
-  mean: emb_s = mean(emb_{v_1}, emb_{v_2}, ..., emb_{v_k})    # 默认
-  max:  emb_s = max(emb_{v_1}, emb_{v_2}, ..., emb_{v_k})
+四种评分策略（`data.variant_scoring`）：
+
+| 策略 | 算法 | 特点 |
+|------|------|------|
+| `relative` | `score = -mean(cos_sim(diff_hap1, diff_ref), cos_sim(diff_hap2, diff_ref))` | 偏离背景越多分越高，背景校正，但可能忽略绝对效应大的变异 |
+| `absolute` | `score = ‖diff_hap1‖ + ‖diff_hap2‖` | 衡量变异绝对效应，无背景校正 |
+| `weighted` | 两套分各自 min-max 归一化后加权求和：`w·norm(rel) + (1-w)·norm(abs)`，由 `score_weight` 控制权重 | 平衡背景校正与绝对效应 |
+| `cascade` | 先 `absolute` 粗筛 top λk（λ=`cascade_lambda`），再 `relative` 精选 top k | 两阶段筛选，先粗后精 |
+
+所有策略最终得分越高越优先。
+
+#### 2. Top-k 选择
+
+按得分降序选取 `data.top_k` 个变异（`top_k=0` 时不筛选，全量保留）。
+
+#### 3. 聚合
+
+对 top-k 变异的 `Mut_hap1` 向量聚合（`data.emb_aggregation`）：
+
+```
+mean: emb_s = mean(emb_{v_1}, ..., emb_{v_k})    # 默认
+max:  emb_s = max(emb_{v_1}, ..., emb_{v_k})
 ```
 
 聚合后每个样本得到一个 `hidden_size × 2` 维的特征向量，进入 PCA 降维后作为基因组模态特征。
@@ -666,7 +691,11 @@ data:
   label_file: "/path/to/labels.csv"
   sample_id_col: "sample_id"
   label_col: "label"
-  emb_aggregation: "mean"              # mean / concat
+  emb_aggregation: "mean"              # top-k 聚合方式：mean / max
+  variant_scoring: "absolute"         # relative / absolute / weighted / cascade
+  top_k: 10                           # 选取的变异数（0=不筛选）
+  score_weight: 0.5                   # weighted 策略的权重
+  cascade_lambda: 2.0                 # cascade 策略的粗筛倍数
 
 # 预处理（仅在训练集上拟合，防止数据泄露）
 preprocess:
