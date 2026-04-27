@@ -180,15 +180,15 @@ samtools faidx /path/to/hg38.fa
 
 ### 3. 准备 BED 文件
 
-BED 文件为 0-based、半开区间，**第四列必须填写变异名称**（格式 `chr_pos_ref_alt`，1-based pos）：
+BED 文件为 0-based、半开区间，标准 3 列格式即可：
 
 ```
-chr1    100000  100200  chr1_100100_A_T
-chr2    500000  500500  chr2_500300_AT_A
-chrX    2000000 2000300 chrX_2000150_G_C
+chr1    100000  100200
+chr2    500000  500500
+chrX    2000000 2000300
 ```
 
-程序默认以 `auto` 模式在内部自动完成 upstream/downstream 拆分（无需手工处理）。若需外部预拆分，第四列应以 `_upstream`/`_downstream` 结尾，并在 `config/default.yaml` 中设置 `bed_split.mode: presplit`。
+程序默认以 `auto` 模式运行，BED 仅定义待分析区间（chrom, start, end），变异信息从 VCF 中自动提取，第四列不影响运行。若使用 `presplit` 模式（`bed_split.mode: presplit`），则需外部预先完成 upstream/downstream 拆分，第四列以 `_upstream`/`_downstream` 结尾。
 
 ### 4. 运行
 
