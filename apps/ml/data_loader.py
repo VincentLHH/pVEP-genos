@@ -43,12 +43,14 @@ class MultiOmicsDataLoader:
         self._labels = None
         self._sample_ids = None
         self._feature_names = None
+        self._loaded = False
 
     def load_all(self) -> Tuple[np.ndarray, np.ndarray, List[str], List[str]]:
         """
         加载全部数据并整合。
 
         流程：先对齐样本ID，再按需加载，避免浪费内存。
+        首次调用后缓存全部数据，后续调用直接返回缓存。
 
         Returns:
             X: 特征矩阵 (n_samples, n_features)
@@ -56,6 +58,10 @@ class MultiOmicsDataLoader:
             feature_names: 特征名列表
             sample_ids: 样本ID列表
         """
+        if self._loaded:
+            X = self._assemble_features()
+            return X, self._labels.values, self._build_feature_names(), self._sample_ids
+
         # 第一步：加载标签并探查各源可用ID
         self._load_labels()
         common_ids = self._peek_and_align_ids()
@@ -66,6 +72,7 @@ class MultiOmicsDataLoader:
         self._load_pheno(common_ids)
 
         # 整合特征
+        self._loaded = True
         X = self._assemble_features()
         feature_names = self._build_feature_names()
 
