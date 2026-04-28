@@ -104,7 +104,7 @@ class HyperparamConfig:
     })
     logistic_regression: Dict = field(default_factory=lambda: {
         "C": [0.01, 0.1, 1.0, 10.0],
-        "penalty": ["l1", "l2"],
+        "l1_ratio": [0, 1],
         "solver": ["liblinear"],
         "max_iter": [1000],
     })
