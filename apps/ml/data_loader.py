@@ -432,9 +432,9 @@ class MultiOmicsDataLoader:
         return mh1
 
     @staticmethod
-    def _score_absolute(dh1, dh2):
-        """策略2：变异绝对效应大小。"""
-        return float(np.linalg.norm(dh1) + np.linalg.norm(dh2))
+    def _score_absolute(dh1, dh2, dref):
+        """策略2：变异绝对效应大小（含 ref 背景效应）。"""
+        return float(np.linalg.norm(dh1) + np.linalg.norm(dh2) + np.linalg.norm(dref))
 
     def _select_top_variants(self, variant_data: list) -> list:
         """
@@ -456,7 +456,7 @@ class MultiOmicsDataLoader:
         for emb_dict, _ in variant_data:
             dh1, dh2, dref = self._diff_vectors(emb_dict)
             raw_rel.append(self._score_relative(dh1, dh2, dref))
-            raw_abs.append(self._score_absolute(dh1, dh2))
+            raw_abs.append(self._score_absolute(dh1, dh2, dref))
 
         if strategy == "relative":
             final_scores = raw_rel
