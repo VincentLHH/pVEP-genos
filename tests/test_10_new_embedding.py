@@ -783,28 +783,33 @@ class TestComputeW:
 
     def test_snp(self):
         v = Variant("chr1", 1, "A", "T", (1, 0))
-        # var_len = max(1-1+1, 1) = 1, w = 3
         assert EmbeddingExtractor.compute_w(v) == 3
+        assert EmbeddingExtractor.compute_w_mut(v) == 3
+        assert EmbeddingExtractor.compute_w_wt(v) == 3
 
     def test_ins(self):
         v = Variant("chr1", 1, "A", "AT", (0, 1))
-        # var_len = max(2-1+1, 1) = max(2, 1) = 2, w = 4
         assert EmbeddingExtractor.compute_w(v) == 4
+        assert EmbeddingExtractor.compute_w_mut(v) == 4  # alt=2 + 2
+        assert EmbeddingExtractor.compute_w_wt(v) == 3   # ref=1 + 2
 
     def test_del(self):
         v = Variant("chr1", 1, "AT", "A", (1, 1))
-        # var_len = max(1-2+1, 1) = max(0, 1) = 1, w = 3
         assert EmbeddingExtractor.compute_w(v) == 3
+        assert EmbeddingExtractor.compute_w_mut(v) == 3  # alt=1 + 2
+        assert EmbeddingExtractor.compute_w_wt(v) == 4   # ref=2 + 2
 
     def test_mnv(self):
         v = Variant("chr1", 1, "ATC", "GTG", (0, 0))
-        # var_len = max(3-3+1, 1) = max(1, 1) = 1, w = 3
-        assert EmbeddingExtractor.compute_w(v) == 3
+        assert EmbeddingExtractor.compute_w(v) == 5
+        assert EmbeddingExtractor.compute_w_mut(v) == 5  # alt=3 + 2
+        assert EmbeddingExtractor.compute_w_wt(v) == 5   # ref=3 + 2
 
     def test_long_ins(self):
         v = Variant("chr1", 1, "A", "ATTTTTT", (1, 0))
-        # var_len = max(7-1+1, 1) = max(7, 1) = 7, w = 9
         assert EmbeddingExtractor.compute_w(v) == 9
+        assert EmbeddingExtractor.compute_w_mut(v) == 9  # alt=7 + 2
+        assert EmbeddingExtractor.compute_w_wt(v) == 3   # ref=1 + 2
 
 
 # ===========================================================================

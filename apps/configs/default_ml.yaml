@@ -86,7 +86,7 @@ hyperparam:
   
   logistic_regression:
     C: [0.01, 0.1, 1.0, 10.0]
-    l1_ratio: [0, 1]
+    penalty: [l1, l2]
     solver: [liblinear]
     max_iter: [1000]
   

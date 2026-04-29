@@ -140,12 +140,10 @@ def create_model(model_name: str, random_state: int = 42, **model_params) -> Sta
         lr_params = {k: v for k, v in model_params.items() if k in _LR_PARAMS}
         if "penalty" in lr_params:
             penalty_val = lr_params.pop("penalty")
-            if penalty_val == "l1":
-                lr_params["l1_ratio"] = 1
-            elif penalty_val == "l2":
-                lr_params["l1_ratio"] = 0
-            elif penalty_val is None:
+            if penalty_val is None:
                 lr_params["C"] = 1e10
+            elif penalty_val != "l2":
+                lr_params["penalty"] = penalty_val
         model = LogisticRegression(random_state=random_state, **lr_params)
         return StandardizableModel(model, need_scaling=True)
 

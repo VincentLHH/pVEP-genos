@@ -124,19 +124,18 @@ class EmbeddingExtractor:
 
     @staticmethod
     def compute_w(center_variant: Variant) -> int:
-        """
-        计算 tail pooling 窗口大小 w。
+        """DEPRECATED: 返回 mut 的 w。请使用 compute_w_mut / compute_w_wt。"""
+        return len(center_variant.alt) + 2
 
-        w = var_len + 2
-        var_len = max(len(alt) - len(ref) + 1, 1)
+    @staticmethod
+    def compute_w_mut(center_variant: Variant) -> int:
+        """mut 序列 tail pooling 窗口大小：alt 区域 + 上下游各 1 bp"""
+        return len(center_variant.alt) + 2
 
-        例子：
-          SNP A→T  : var_len=1, w=3
-          INS A→AT : var_len=max(2-1+1,1)=max(2,1)=2, w=4
-          DEL AT→A : var_len=max(1-2+1,1)=max(0,1)=1, w=3
-        """
-        var_len = max(len(center_variant.alt) - len(center_variant.ref) + 1, 1)
-        return var_len + 2
+    @staticmethod
+    def compute_w_wt(center_variant: Variant) -> int:
+        """wt 序列 tail pooling 窗口大小：ref 区域 + 上下游各 1 bp"""
+        return len(center_variant.ref) + 2
 
     # -----------------------------------------------------------------------
     # 主接口
@@ -168,14 +167,14 @@ class EmbeddingExtractor:
             "WT_ref":   np.ndarray [hidden_size*2],
         }
         """
-        w = self.compute_w(center_variant)
+        w_mut = self.compute_w_mut(center_variant)
+        w_wt = self.compute_w_wt(center_variant)
 
         # 使用全局缓存或临时缓存（关闭全局缓存时，仍在同一变异内部去重）
         cache = self._cache if self._cache is not None else {}
 
-        # 1. 收集所有需要推理的序列（正链），去重（缓存键相同则跳过）
-        # 格式：{cache_key: seq_str}
-        key_to_seq: Dict[str, str] = {}
+        # 1. 按 w 分组收集序列（mut/wt 序列长度不同时 tail 窗口也不同）
+        key_to_seq_by_w: Dict[int, Dict[str, str]] = {w_mut: {}, w_wt: {}}
 
         # 2. 建立 (hap_name, mut_or_wt, direction) → cache_key 的映射
         key_to_cache: Dict[Tuple[str, str, str], str] = {}
@@ -186,34 +185,31 @@ class EmbeddingExtractor:
                 ("hap2", result.hap2),
                 ("ref",  result.ref_pair),
             ]:
-                # upstream 方向：正链直接推理
-                # downstream 方向：取反向互补链推理
                 for mut_or_wt in ("mut", "wt"):
-                    # 获取序列（wt_is_alias_of_mut 时 wt == mut）
+                    w = w_mut if mut_or_wt == "mut" else w_wt
                     if mut_or_wt == "mut":
                         seq_fwd = pair.mut
                     else:
                         seq_fwd = pair.wt if not pair.wt_is_alias_of_mut else pair.mut
 
                     if direction == "dn":
-                        # downstream 行取反向互补
                         seq_for_infer = reverse_complement(seq_fwd)
                     else:
                         seq_for_infer = seq_fwd
 
                     ck = _cache_key(seq_for_infer, w, self.pooling)
-                    key_to_seq[ck] = seq_for_infer
+                    key_to_seq_by_w[w][ck] = seq_for_infer
                     key_to_cache[(direction, hap_name, mut_or_wt)] = ck
 
-        # 3. 批量推理未命中缓存的序列，并做 tail pooling
-        seqs_to_infer = [
-            (ck, seq) for ck, seq in key_to_seq.items()
-            if ck not in cache
-        ]
-
-        if seqs_to_infer:
-            cache_keys, seqs = zip(*seqs_to_infer)
-            self._run_inference(list(seqs), list(cache_keys), w, cache)
+        # 3. 按 w 分组批量推理（不同 w 的序列分开推理，保证 tail pooling 正确）
+        for w, kt_seq in key_to_seq_by_w.items():
+            seqs_to_infer = [
+                (ck, seq) for ck, seq in kt_seq.items()
+                if ck not in cache
+            ]
+            if seqs_to_infer:
+                cache_keys, seqs = zip(*seqs_to_infer)
+                self._run_inference(list(seqs), list(cache_keys), w, cache)
 
         # 4. 组装 6 种 embedding（emb_up concat emb_down）
         result: Dict[str, np.ndarray] = {}
@@ -263,9 +259,11 @@ class EmbeddingExtractor:
         per_variant_key_maps: List[Dict[Tuple[str, str, str], str]] = []
 
         for variant, up_r, dn_r in zip(variants, up_results, dn_results):
-            w = self.compute_w(variant)
-            if w not in per_w_seqs:
-                per_w_seqs[w] = {}
+            w_mut = self.compute_w_mut(variant)
+            w_wt = self.compute_w_wt(variant)
+            for w in (w_mut, w_wt):
+                if w not in per_w_seqs:
+                    per_w_seqs[w] = {}
 
             key_to_cache: Dict[Tuple[str, str, str], str] = {}
 
@@ -276,6 +274,7 @@ class EmbeddingExtractor:
                     ("ref",  result.ref_pair),
                 ]:
                     for mut_or_wt in ("mut", "wt"):
+                        w = w_mut if mut_or_wt == "mut" else w_wt
                         if mut_or_wt == "mut":
                             seq_fwd = pair.mut
                         else:
