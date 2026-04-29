@@ -496,5 +496,75 @@ class TestFormatSwitch:
         assert sample_npz.embeddings == {}
 
 
+class TestCrossFormatConsistency:
+    """跨格式一致性：JSON / NPZ / HDF5 写入相同数据后读回结果一致的"""
+
+    DATA = {
+        "v1": {
+            "Genos-1.2B": {
+                "Mut_hap1": [0.1, 0.2, 0.3],
+                "WT_hap1": [0.4, 0.5, 0.6],
+                "Mut_hap2": [0.7, 0.8, 0.9],
+                "WT_hap2": [1.0, 1.1, 1.2],
+                "Mut_ref": [1.3, 1.4, 1.5],
+                "WT_ref": [1.6, 1.7, 1.8],
+            }
+        },
+        "v2": {
+            "Genos-1.2B": {
+                "Mut_hap1": [2.1, 2.2, 2.3],
+                "WT_hap1": [2.4, 2.5, 2.6],
+            }
+        },
+    }
+
+    def _save_and_reload(self, fmt, temp_output):
+        sample = Sample("cross", temp_output, save_haplotypes=False, save_embeddings=True,
+                        output_format=fmt)
+        sample.embeddings = self.DATA
+        sample.save()
+        sample2 = Sample("cross", temp_output, save_haplotypes=False, save_embeddings=True,
+                         output_format=fmt)
+        return sample2.embeddings
+
+    def test_json_vs_npz(self, temp_output):
+        json_emb = self._save_and_reload("json", temp_output)
+        npz_emb = self._save_and_reload("npz", temp_output)
+        assert json_emb.keys() == npz_emb.keys()
+        for var_id in json_emb:
+            assert json_emb[var_id].keys() == npz_emb[var_id].keys()
+            for model in json_emb[var_id]:
+                for key in json_emb[var_id][model]:
+                    a = json_emb[var_id][model][key]
+                    b = npz_emb[var_id][model][key]
+                    assert a == pytest.approx(b), f"npz mismatch: {var_id}/{model}/{key}"
+
+    def test_json_vs_hdf5(self, temp_output):
+        pytest.importorskip("h5py")
+        json_emb = self._save_and_reload("json", temp_output)
+        h5_emb = self._save_and_reload("hdf5", temp_output)
+        assert json_emb.keys() == h5_emb.keys()
+        for var_id in json_emb:
+            assert json_emb[var_id].keys() == h5_emb[var_id].keys()
+            for model in json_emb[var_id]:
+                for key in json_emb[var_id][model]:
+                    a = json_emb[var_id][model][key]
+                    b = h5_emb[var_id][model][key]
+                    assert a == pytest.approx(b), f"hdf5 mismatch: {var_id}/{model}/{key}"
+
+    def test_all_three_identical(self, temp_output):
+        pytest.importorskip("h5py")
+        json_emb = self._save_and_reload("json", temp_output)
+        npz_emb = self._save_and_reload("npz", temp_output)
+        h5_emb = self._save_and_reload("hdf5", temp_output)
+        for fmt_name, fmt_emb in [("npz", npz_emb), ("hdf5", h5_emb)]:
+            for var_id in json_emb:
+                for model in json_emb[var_id]:
+                    for key in json_emb[var_id][model]:
+                        a = json_emb[var_id][model][key]
+                        b = fmt_emb[var_id][model][key]
+                        assert a == pytest.approx(b), f"{fmt_name} mismatch: {var_id}/{model}/{key}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
