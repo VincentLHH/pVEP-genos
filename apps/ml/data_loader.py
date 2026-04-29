@@ -376,10 +376,10 @@ class MultiOmicsDataLoader:
 
     @staticmethod
     def _score_relative(dh1, dh2, dref):
-        """策略1：偏离背景的程度，更高=更不似背景。"""
+        """策略1：偏离背景的程度，0=一致，2=完全相反。"""
         sim1 = MultiOmicsDataLoader._cosine_sim(dh1, dref)
         sim2 = MultiOmicsDataLoader._cosine_sim(dh2, dref)
-        return -(sim1 + sim2) / 2.0
+        return 1.0 - (sim1 + sim2) / 2.0
 
     @staticmethod
     def _build_rep_vector(emb_dict: dict, strategy: str):
@@ -474,18 +474,25 @@ class MultiOmicsDataLoader:
         top_indices = [i for i, _ in ranked[:top_k]]
         return [variant_data[i][1] for i in top_indices]
 
+    @staticmethod
+    def _to_rank_pct(arr: np.ndarray) -> np.ndarray:
+        """将数组转为 rank percentile [0, 1]，不受离群值和量级影响。"""
+        n = len(arr)
+        if n <= 1:
+            return np.full(n, 0.5)
+        order = np.argsort(arr)
+        ranks = np.empty(n)
+        ranks[order] = np.arange(n)
+        return ranks / (n - 1)
+
     def _combine_weighted(self, raw_rel, raw_abs):
-        """策略3：min-max 归一化后加权求和。"""
+        """策略3：rank percentile 归一化后加权求和（量级无关）。"""
         rel = np.asarray(raw_rel, dtype=float)
         abs_ = np.asarray(raw_abs, dtype=float)
-        for arr in (rel, abs_):
-            rng = arr.max() - arr.min()
-            if rng > 0:
-                arr[...] = (arr - arr.min()) / rng
-            else:
-                arr[...] = 0.0
+        rel_pct = self._to_rank_pct(rel)
+        abs_pct = self._to_rank_pct(abs_)
         w = self.cfg.score_weight
-        return (w * rel + (1 - w) * abs_).tolist()
+        return (w * rel_pct + (1 - w) * abs_pct).tolist()
 
     def _select_cascade(self, raw_abs, raw_rel, variant_data, top_k):
         """策略4：先用 absolute 粗筛 λk，再用 relative 精选 k。"""
