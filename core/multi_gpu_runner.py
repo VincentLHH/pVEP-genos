@@ -54,6 +54,7 @@ def _worker(
     do_inference: bool,
     save_embeddings: bool,
     shared_cache: DictProxy,
+    output_format: str = "json",
     bed_split_n: int = 200,
     variant_batch_size: int = 16,
     filter_hom_ref: bool = True,
@@ -111,6 +112,7 @@ def _worker(
                 save_haplotypes=save_haplotypes,
                 do_inference=do_inference,
                 save_embeddings=save_embeddings,
+                output_format=output_format,
             )
 
             # 样本级断点续存
@@ -199,6 +201,7 @@ def run_multi_gpu(
     save_haplotypes: bool,
     do_inference: bool,
     save_embeddings: bool,
+    output_format: str = "json",
     bed_split_n: int = 200,
     use_global_cache: bool = True,
     variant_batch_size: int = 16,
@@ -260,6 +263,7 @@ def run_multi_gpu(
                     do_inference=do_inference,
                     save_embeddings=save_embeddings,
                     shared_cache=shared_cache if use_global_cache else None,
+                    output_format=output_format,
                     bed_split_n=bed_split_n,
                     variant_batch_size=variant_batch_size,
                     filter_hom_ref=filter_hom_ref,

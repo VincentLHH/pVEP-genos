@@ -79,7 +79,7 @@ embedding:
   # 定期保存间隔（每处理多少个 variant 保存一次）
   save_interval: 50
 
-  # 输出格式：json（默认，兼容旧版）、numpy（.npz）、h5（.h5）
+  # 输出格式：json（默认，文本格式）、npz（压缩二进制，推荐）、hdf5（.h5，支持增量写入）
   output_format: json
 
   # 是否在输出中保存重建的单倍型序列（可能较大）

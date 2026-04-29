@@ -18,6 +18,8 @@ class Sample:
     save_embeddings : bool
         是否将 embedding 保存到磁盘（若为 False 则不保存到文件，默认 True）。
         do_inference=False 时此参数无效。
+    output_format : str
+        输出格式：json / npz / hdf5（默认 json）。
 
     新版 Embedding 格式
     -------------------
@@ -31,6 +33,8 @@ class Sample:
     }
     """
 
+    _EXTENSIONS = {"json": ".json", "npz": ".npz", "hdf5": ".h5"}
+
     def __init__(
         self,
         sample_id: str,
@@ -38,18 +42,21 @@ class Sample:
         save_haplotypes: bool = True,
         do_inference: bool = True,
         save_embeddings: bool = True,
+        output_format: str = "json",
     ):
         self.sample_id = sample_id
         self.output_dir = output_dir
         self.save_haplotypes = save_haplotypes
         self.do_inference = do_inference
         self.save_embeddings = save_embeddings
+        self.output_format = output_format
 
         self.haplotypes: Dict = {}
         self.embeddings: Dict = {}
 
         os.makedirs(self.output_dir, exist_ok=True)
-        self.filepath = os.path.join(self.output_dir, f"{sample_id}.json")
+        ext = self._EXTENSIONS.get(output_format, ".json")
+        self.filepath = os.path.join(self.output_dir, f"{sample_id}{ext}")
 
         self._load_if_exists()
 
@@ -59,22 +66,109 @@ class Sample:
     def _load_if_exists(self):
         if os.path.exists(self.filepath):
             print(f"🔁 Resuming sample {self.sample_id}")
-            with open(self.filepath, "r") as f:
-                data = json.load(f)
-                self.haplotypes = data.get("haplotypes", {})
-                self.embeddings = data.get("embeddings", {})
+            loader = getattr(self, f"_load_{self.output_format}", None)
+            if loader:
+                loader()
+            else:
+                self._load_json()
 
     def save(self):
-        data: Dict = {"sample_id": self.sample_id}
+        saver = getattr(self, f"_save_{self.output_format}", None)
+        if saver:
+            saver()
+        else:
+            self._save_json()
 
+    # ---- JSON --------------------------------------------------
+
+    def _load_json(self):
+        with open(self.filepath, "r") as f:
+            data = json.load(f)
+            self.haplotypes = data.get("haplotypes", {})
+            self.embeddings = data.get("embeddings", {})
+
+    def _save_json(self):
+        data: Dict = {"sample_id": self.sample_id}
         if self.save_haplotypes:
             data["haplotypes"] = self.haplotypes
-
         if self.save_embeddings:
             data["embeddings"] = self.embeddings
-
         with open(self.filepath, "w") as f:
             json.dump(data, f)
+
+    # ---- NPZ ---------------------------------------------------
+
+    def _save_npz(self):
+        flat = {"__format__": np.array([3], dtype=np.int8)}
+        if self.save_embeddings:
+            for var_id, models in self.embeddings.items():
+                for model_name, emb_dict in models.items():
+                    for key, arr in emb_dict.items():
+                        flat[f"{var_id}::{model_name}::{key}"] = np.asarray(arr, dtype=np.float32)
+        np.savez_compressed(self.filepath, **flat)
+        self._save_haplotypes_sidecar()
+
+    def _load_npz(self):
+        data = np.load(self.filepath)
+        for full_key, arr in data.items():
+            if full_key == "__format__":
+                continue
+            parts = full_key.split("::", 2)
+            if len(parts) == 3:
+                var_id, model_name, key = parts
+                self.embeddings.setdefault(var_id, {}).setdefault(model_name, {})[key] = arr.tolist()
+        self._load_haplotypes_sidecar()
+
+    # ---- HDF5 --------------------------------------------------
+
+    def _save_hdf5(self):
+        import h5py
+        with h5py.File(self.filepath, "w") as f:
+            f.attrs["format_version"] = 3
+            if self.save_embeddings and self.embeddings:
+                emb_group = f.create_group("embeddings")
+                for var_id, models in self.embeddings.items():
+                    var_group = emb_group.create_group(var_id)
+                    for model_name, emb_dict in models.items():
+                        model_group = var_group.create_group(model_name)
+                        for key, arr in emb_dict.items():
+                            model_group.create_dataset(key, data=np.asarray(arr, dtype=np.float32))
+        self._save_haplotypes_sidecar()
+
+    def _load_hdf5(self):
+        import h5py
+        self.embeddings = {}
+        with h5py.File(self.filepath, "r") as f:
+            if "embeddings" in f:
+                emb_group = f["embeddings"]
+                for var_id in emb_group:
+                    var_group = emb_group[var_id]
+                    var_model_dict = {}
+                    for model_name in var_group:
+                        model_group = var_group[model_name]
+                        emb_dict = {}
+                        for key in model_group:
+                            emb_dict[key] = model_group[key][()].tolist()
+                        var_model_dict[model_name] = emb_dict
+                    self.embeddings[var_id] = var_model_dict
+        self._load_haplotypes_sidecar()
+
+    # ---- Haplotype sidecar -------------------------------------
+
+    def _hap_sidecar_path(self):
+        base = os.path.splitext(self.filepath)[0]
+        return base + "_haplotypes.json"
+
+    def _save_haplotypes_sidecar(self):
+        if self.save_haplotypes and self.haplotypes:
+            with open(self._hap_sidecar_path(), "w") as f:
+                json.dump(self.haplotypes, f)
+
+    def _load_haplotypes_sidecar(self):
+        path = self._hap_sidecar_path()
+        if os.path.exists(path):
+            with open(path, "r") as f:
+                self.haplotypes = json.load(f)
 
     # =========================================================
     # 判断是否已处理

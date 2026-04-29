@@ -333,5 +333,168 @@ class TestCheckpointResume:
         assert FakeManager.call_count == 0, "bulk_get_embeddings should NOT be called when complete"
 
 
+# ===========================================================================
+# NPZ / HDF5 格式测试
+# ===========================================================================
+
+EMB_DATA = {
+    "chr1_100_A_T": {
+        "Genos-1.2B": {
+            "Mut_hap1": [0.1, 0.2, 0.3],
+            "WT_hap1": [0.4, 0.5, 0.6],
+            "Mut_hap2": [0.7, 0.8, 0.9],
+            "WT_hap2": [1.0, 1.1, 1.2],
+            "Mut_ref": [1.3, 1.4, 1.5],
+            "WT_ref": [1.6, 1.7, 1.8],
+        }
+    },
+    "chr1_200_G_C": {
+        "Genos-1.2B": {
+            "Mut_hap1": [2.1, 2.2, 2.3],
+            "WT_hap1": [2.4, 2.5, 2.6],
+        }
+    },
+}
+
+
+class TestNpzSaveLoad:
+    """NPZ 格式的 保存/加载 一致性"""
+
+    def test_save_and_reload_embeddings(self, temp_output):
+        sample = Sample("s1", temp_output, save_haplotypes=False, save_embeddings=True,
+                        output_format="npz")
+        sample.embeddings = EMB_DATA
+        sample.save()
+
+        sample2 = Sample("s1", temp_output, save_haplotypes=False, save_embeddings=True,
+                         output_format="npz")
+        assert "chr1_100_A_T" in sample2.embeddings
+        e = sample2.embeddings["chr1_100_A_T"]["Genos-1.2B"]
+        assert e["Mut_hap1"] == pytest.approx([0.1, 0.2, 0.3])
+        assert len(e) == 6
+
+        assert "chr1_200_G_C" in sample2.embeddings
+        e2 = sample2.embeddings["chr1_200_G_C"]["Genos-1.2B"]
+        assert len(e2) == 2
+
+    def test_save_and_reload_haplotypes(self, temp_output):
+        sample = Sample("s1", temp_output, save_haplotypes=True, save_embeddings=False,
+                        output_format="npz")
+        sample.haplotypes = {"v1": {"ref_seq": "ACGT"}}
+        sample.save()
+
+        sidecar = os.path.join(temp_output, "s1_haplotypes.json")
+        assert os.path.exists(sidecar)
+
+        sample2 = Sample("s1", temp_output, save_haplotypes=True, save_embeddings=False,
+                         output_format="npz")
+        assert sample2.haplotypes == {"v1": {"ref_seq": "ACGT"}}
+
+    def test_npz_file_is_compressed(self, temp_output):
+        sample = Sample("s1", temp_output, save_haplotypes=False, save_embeddings=True,
+                        output_format="npz")
+        sample.embeddings = EMB_DATA
+        sample.save()
+        # NPZ should be smaller than JSON for the same data
+        npz_size = os.path.getsize(sample.filepath)
+        assert npz_size > 0
+        # basic sanity: compressed NPZ should be reasonably small
+        assert npz_size < 10000, f"NPZ too large: {npz_size} bytes"
+
+    def test_flags_embedding_only(self, temp_output):
+        sample = Sample("s1", temp_output, save_haplotypes=False, save_embeddings=True,
+                        output_format="npz")
+        sample.embeddings = {"v1": {"M": {"a": [1.0, 2.0]}}}
+        sample.save()
+        assert os.path.exists(sample.filepath)
+        assert not os.path.exists(os.path.join(temp_output, "s1_haplotypes.json"))
+
+    def test_no_embeddings_saves_empty(self, temp_output):
+        sample = Sample("s1", temp_output, save_haplotypes=False, save_embeddings=True,
+                        output_format="npz")
+        sample.embeddings = {}
+        sample.save()
+        sample2 = Sample("s1", temp_output, save_haplotypes=False, save_embeddings=True,
+                         output_format="npz")
+        assert sample2.embeddings == {}
+
+
+class TestHdf5SaveLoad:
+    """HDF5 格式的 保存/加载 一致性"""
+
+    def test_save_and_reload_embeddings(self, temp_output):
+        pytest.importorskip("h5py")
+        sample = Sample("s1", temp_output, save_haplotypes=False, save_embeddings=True,
+                        output_format="hdf5")
+        sample.embeddings = EMB_DATA
+        sample.save()
+
+        sample2 = Sample("s1", temp_output, save_haplotypes=False, save_embeddings=True,
+                         output_format="hdf5")
+        assert "chr1_100_A_T" in sample2.embeddings
+        e = sample2.embeddings["chr1_100_A_T"]["Genos-1.2B"]
+        assert e["Mut_hap1"] == pytest.approx([0.1, 0.2, 0.3])
+        assert len(e) == 6
+
+    def test_save_and_reload_haplotypes(self, temp_output):
+        pytest.importorskip("h5py")
+        sample = Sample("s1", temp_output, save_haplotypes=True, save_embeddings=False,
+                        output_format="hdf5")
+        sample.haplotypes = {"v1": {"ref_seq": "ACGT"}}
+        sample.save()
+
+        sample2 = Sample("s1", temp_output, save_haplotypes=True, save_embeddings=False,
+                         output_format="hdf5")
+        assert sample2.haplotypes == {"v1": {"ref_seq": "ACGT"}}
+
+    def test_large_embedding_roundtrip(self, temp_output):
+        pytest.importorskip("h5py")
+        import numpy as np
+        large = {
+            "v1": {
+                "Genos-1.2B": {
+                    "Mut_hap1": np.random.randn(3072).tolist(),
+                    "WT_hap1": np.random.randn(3072).tolist(),
+                }
+            }
+        }
+        sample = Sample("s1", temp_output, save_haplotypes=False, save_embeddings=True,
+                        output_format="hdf5")
+        sample.embeddings = large
+        sample.save()
+
+        sample2 = Sample("s1", temp_output, save_haplotypes=False, save_embeddings=True,
+                         output_format="hdf5")
+        e = sample2.embeddings["v1"]["Genos-1.2B"]
+        assert len(e["Mut_hap1"]) == 3072
+
+    def test_no_embeddings_saves_empty(self, temp_output):
+        pytest.importorskip("h5py")
+        sample = Sample("s1", temp_output, save_haplotypes=False, save_embeddings=True,
+                        output_format="hdf5")
+        sample.embeddings = {}
+        sample.save()
+        sample2 = Sample("s1", temp_output, save_haplotypes=False, save_embeddings=True,
+                         output_format="hdf5")
+        assert sample2.embeddings == {}
+
+
+class TestFormatSwitch:
+    """格式切换：修改 output_format 后旧文件不被识别，触发重新处理"""
+
+    def test_switch_from_json_to_npz(self, temp_output):
+        # 先写 JSON
+        sample_json = Sample("s1", temp_output, save_haplotypes=False, save_embeddings=True,
+                             output_format="json")
+        sample_json.embeddings = {"v1": {"M": {"a": [1.0]}}}
+        sample_json.save()
+
+        # 切换为 NPZ → 不应该加载 JSON 数据
+        sample_npz = Sample("s1", temp_output, save_haplotypes=False, save_embeddings=True,
+                            output_format="npz")
+        # NPZ 文件不存在 → embeddings 应为空
+        assert sample_npz.embeddings == {}
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])

@@ -361,6 +361,7 @@ def run_single(cfg, devices, seq_builder_type, mode, api_base_url, save_haplotyp
             save_haplotypes=save_haplotypes,
             do_inference=do_inference,
             save_embeddings=save_embeddings,
+            output_format=embedding_cfg.get("output_format", "json"),
         )
 
         # 样本级断点续存（CPU 优化，跳过已完整处理的样本）
@@ -443,6 +444,7 @@ def run_multi(cfg, devices, seq_builder_type, save_haplotypes, do_inference, sav
         save_haplotypes=save_haplotypes,
         do_inference=do_inference,
         save_embeddings=save_embeddings,
+        output_format=embedding_cfg.get("output_format", "json"),
         bed_split_n=n,
         use_global_cache=use_global_cache,
         variant_batch_size=variant_batch_size,
