@@ -26,8 +26,9 @@ data:
 
   # -- 变异评分与 top-k 选择 --
   # 评分策略：
-  #   relative : 背景校正 (cos_sim(diff_hap, diff_ref) 取反)
-  #   absolute : 绝对效应 (||diff_hap1|| + ||diff_hap2||)
+  #   relative : 背景偏离度 (1 - mean(cos_sim(dh1,dref), cos_sim(dh2,dref)))
+  #   absolute : 绝对效应 (||dh1|| + ||dh2|| + ||dref||)
+  #   delta    : 变异效应 L2 范数 ||Mean(Mut1-WT1, Mut2-WT2)||_2
   #   weighted : relative + absolute 加权
   #   cascade  : 先用 absolute 粗筛 λk，再用 relative 精选 k
   variant_scoring: "absolute"
@@ -51,6 +52,7 @@ data:
   #   mut_hap1_hap2_concat: concat(Mut_hap1, Mut_hap2)  注意：维度翻倍
   #   mut_mean_minus_wt_ref: (Mut_hap1+Mut_hap2)/2 - WT_ref
   #   mut_concat_minus_wt_ref: concat(Mut_hap1-WT_ref, Mut_hap2-WT_ref)  注意：维度翻倍
+  #   baseline_delta_deltaref: Concat(Mean(WT1,WT2), Mean(Mut1-WT1,Mut2-WT2), Mut_ref-WT_ref)  维度3x
   emb_representation: "mut_hap1"
 
 # 预处理配置（防止数据泄露的关键）
