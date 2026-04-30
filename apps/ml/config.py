@@ -31,9 +31,10 @@ class DataConfig:
     # -- 变异评分与选择 --
     # 评分策略：
     #   relative : 背景校正 (cos_sim(diff_hap, diff_ref))
-    #   absolute : 绝对效应 (||diff_hap1|| + ||diff_hap2||)
+    #   absolute : 绝对效应 (||dh1|| + ||dh2|| + ||dref||)
     #   weighted : relative + absolute 加权
     #   cascade  : 先用 absolute 粗筛 λk，再用 relative 精选 k
+    #   delta    : ||Emb_delta||_2（变异效应 L2 范数）
     variant_scoring: str = "absolute"
     # 每个样本选取的 top-k 变异数
     top_k: int = 0  # 0 = 不选，全量聚合
@@ -51,6 +52,7 @@ class DataConfig:
     #   mut_hap1_hap2_concat: concat(Mut_hap1, Mut_hap2)  注意：维度翻倍
     #   mut_mean_minus_wt_ref: (Mut_hap1+Mut_hap2)/2 - WT_ref
     #   mut_concat_minus_wt_ref: concat(Mut_hap1-WT_ref, Mut_hap2-WT_ref)  注意：维度翻倍
+    #   baseline_delta_deltaref: Concat(Mean(WT_hap1,WT_hap2), Mean(Mut_h1-WT_h1,Mut_h2-WT_h2), Mut_ref-WT_ref)  注意：维度3x
     emb_representation: str = "mut_hap1"
     # 是否标准化特征
     standardize: bool = True

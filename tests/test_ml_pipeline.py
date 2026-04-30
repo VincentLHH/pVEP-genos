@@ -555,6 +555,88 @@ class TestAblatorWithMonk:
 
 
 # ============================================================
+# TestRepresentation & Scoring
+# ============================================================
+
+class TestBuildRepVector:
+    """_build_rep_vector 表示策略。"""
+
+    @staticmethod
+    def _make_emb(dim=4):
+        return {
+            "Mut_hap1": np.arange(1, dim + 1, dtype=float),
+            "WT_hap1": np.zeros(dim, dtype=float),
+            "Mut_hap2": np.arange(dim + 1, 2 * dim + 1, dtype=float),
+            "WT_hap2": np.ones(dim, dtype=float),
+            "Mut_ref": np.full(dim, 10.0, dtype=float),
+            "WT_ref": np.full(dim, 5.0, dtype=float),
+        }
+
+    def test_baseline_delta_deltaref_shape(self):
+        from apps.ml.data_loader import MultiOmicsDataLoader as DL
+        emb = self._make_emb(4)
+        vec = DL._build_rep_vector(emb, "baseline_delta_deltaref")
+        assert len(vec) == 4 * 3  # baseline + delta + delta_ref, each dim=4
+
+    def test_baseline_delta_deltaref_values(self):
+        from apps.ml.data_loader import MultiOmicsDataLoader as DL
+        emb = self._make_emb(4)
+        vec = DL._build_rep_vector(emb, "baseline_delta_deltaref")
+        dim = 4
+        baseline = vec[:dim]      # Mean(WT_hap1, WT_hap2) = mean([0,0,0,0], [1,1,1,1])
+        delta = vec[dim:2*dim]     # Mean(Mut1-WT1, Mut2-WT2)
+        delta_ref = vec[2*dim:]    # Mut_ref - WT_ref
+        assert baseline == pytest.approx([0.5, 0.5, 0.5, 0.5])
+        # Mut1=[1,2,3,4], WT1=[0,0,0,0] → δ1=[1,2,3,4]
+        # Mut2=[5,6,7,8], WT2=[1,1,1,1] → δ2=[4,5,6,7]
+        # Mean = [2.5, 3.5, 4.5, 5.5]
+        assert delta == pytest.approx([2.5, 3.5, 4.5, 5.5])
+        assert delta_ref == pytest.approx([5.0, 5.0, 5.0, 5.0])
+
+    def test_baseline_delta_deltaref_no_ref(self):
+        from apps.ml.data_loader import MultiOmicsDataLoader as DL
+        emb = self._make_emb(4)
+        del emb["Mut_ref"], emb["WT_ref"]
+        vec = DL._build_rep_vector(emb, "baseline_delta_deltaref")
+        delta_ref = vec[8:]  # 3rd part: zeros
+        assert delta_ref == pytest.approx([0, 0, 0, 0])
+
+
+class TestScoreDelta:
+    """_score_delta top-k 评分策略。"""
+
+    @staticmethod
+    def _make_emb(dim=4):
+        return {
+            "Mut_hap1": np.array([3.0, 4.0, 0.0, 0.0], dtype=float),
+            "WT_hap1": np.array([0.0, 0.0, 0.0, 0.0], dtype=float),
+            "Mut_hap2": np.array([3.0, 4.0, 0.0, 0.0], dtype=float),
+            "WT_hap2": np.array([0.0, 0.0, 0.0, 0.0], dtype=float),
+        }
+
+    def test_delta_score(self):
+        from apps.ml.data_loader import MultiOmicsDataLoader as DL
+        emb = self._make_emb()
+        score = DL._score_delta(emb)
+        # delta_h1 = [3,4,0,0], delta_h2 = [3,4,0,0], avg = [3,4,0,0]
+        # ||avg||_2 = sqrt(9+16+0+0) = 5.0
+        assert score == pytest.approx(5.0)
+
+    def test_delta_score_missing_hap2(self):
+        from apps.ml.data_loader import MultiOmicsDataLoader as DL
+        emb = self._make_emb()
+        del emb["Mut_hap2"], emb["WT_hap2"]
+        score = DL._score_delta(emb)
+        # delta = Mut_hap1 - WT_hap1 = [3,4,0,0], norm = 5.0
+        assert score == pytest.approx(5.0)
+
+    def test_delta_score_zero(self):
+        from apps.ml.data_loader import MultiOmicsDataLoader as DL
+        emb = {"Mut_hap1": []}
+        assert DL._score_delta(emb) == 0.0
+
+
+# ============================================================
 # TestConfig
 # ============================================================
 

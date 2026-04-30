@@ -392,10 +392,13 @@ class MultiOmicsDataLoader:
           mut_hap1_hap2_concat: concat(Mut_hap1, Mut_hap2)
           mut_mean_minus_wt_ref: (Mut_hap1 + Mut_hap2) / 2 - WT_ref
           mut_concat_minus_wt_ref: concat(Mut_hap1 - WT_ref, Mut_hap2 - WT_ref)
+          baseline_delta_deltaref: Concat(Emb_baseline, Emb_delta, Emb_delta_ref)
+            维度 = 3 * hidden_dim
         """
         mh1 = np.asarray(emb_dict.get("Mut_hap1", []), dtype=float)
         if len(mh1) == 0:
             return None
+        dim = len(mh1)
 
         if strategy == "mut_hap1":
             return mh1
@@ -404,10 +407,10 @@ class MultiOmicsDataLoader:
         wt_ref = np.asarray(emb_dict.get("WT_ref", []), dtype=float)
 
         if strategy == "mut_hap2":
-            return mh2 if len(mh2) == len(mh1) else mh1
+            return mh2 if len(mh2) == dim else mh1
 
-        has_mh2 = len(mh2) == len(mh1)
-        has_wt = len(wt_ref) == len(mh1)
+        has_mh2 = len(mh2) == dim
+        has_wt = len(wt_ref) == dim
 
         if strategy == "mut_hap1_hap2_mean":
             if not has_mh2:
@@ -428,6 +431,37 @@ class MultiOmicsDataLoader:
             right = mh2 - wt_ref if has_wt and has_mh2 else (mh2 if has_mh2 else mh1)
             return np.hstack([left, right])
 
+        if strategy == "baseline_delta_deltaref":
+            wh1 = np.asarray(emb_dict.get("WT_hap1", []), dtype=float)
+            wh2 = np.asarray(emb_dict.get("WT_hap2", []), dtype=float)
+            mr = np.asarray(emb_dict.get("Mut_ref", []), dtype=float)
+            wr = np.asarray(emb_dict.get("WT_ref", []), dtype=float)
+
+            has_wh1 = len(wh1) == dim
+            has_wh2 = len(wh2) == dim
+            has_full_hap2 = has_mh2 and has_wh2
+            has_ref = len(mr) == dim and len(wr) == dim
+
+            # Emb_baseline = Mean(WT_hap1, WT_hap2)
+            if has_wh1 and has_wh2:
+                baseline = (wh1 + wh2) / 2.0
+            elif has_wh1:
+                baseline = wh1
+            else:
+                baseline = np.zeros(dim)
+
+            # Emb_delta = Mean(Mut_hap1-WT_hap1, Mut_hap2-WT_hap2)
+            delta_h1 = mh1 - wh1 if has_wh1 else np.zeros(dim)
+            if has_full_hap2:
+                delta = (delta_h1 + (mh2 - wh2)) / 2.0
+            else:
+                delta = delta_h1
+
+            # Emb_delta_ref = Mut_ref - WT_ref
+            delta_ref = (mr - wr) if has_ref else np.zeros(dim)
+
+            return np.hstack([baseline, delta, delta_ref])
+
         # 未知策略 → fallback
         return mh1
 
@@ -435,6 +469,21 @@ class MultiOmicsDataLoader:
     def _score_absolute(dh1, dh2, dref):
         """策略2：变异绝对效应大小（含 ref 背景效应）。"""
         return float(np.linalg.norm(dh1) + np.linalg.norm(dh2) + np.linalg.norm(dref))
+
+    @staticmethod
+    def _score_delta(emb_dict: dict):
+        """策略：||Emb_delta||_2，即变异效应向量的 L2 范数。"""
+        mh1 = np.asarray(emb_dict.get("Mut_hap1", []), dtype=float)
+        wh1 = np.asarray(emb_dict.get("WT_hap1", []), dtype=float)
+        if len(mh1) == 0:
+            return 0.0
+        dim = len(mh1)
+        delta = mh1 - wh1 if len(wh1) == dim else mh1
+        mh2 = np.asarray(emb_dict.get("Mut_hap2", []), dtype=float)
+        wh2 = np.asarray(emb_dict.get("WT_hap2", []), dtype=float)
+        if len(mh2) == dim and len(wh2) == dim:
+            delta = (delta + (mh2 - wh2)) / 2.0
+        return float(np.linalg.norm(delta))
 
     def _select_top_variants(self, variant_data: list) -> list:
         """
@@ -450,18 +499,22 @@ class MultiOmicsDataLoader:
         strategy = self.cfg.variant_scoring
         n = len(variant_data)
 
-        # 预计算两套原始分
+        # 预计算原始分
         raw_rel = []
         raw_abs = []
+        raw_delta = []
         for emb_dict, _ in variant_data:
             dh1, dh2, dref = self._diff_vectors(emb_dict)
             raw_rel.append(self._score_relative(dh1, dh2, dref))
             raw_abs.append(self._score_absolute(dh1, dh2, dref))
+            raw_delta.append(self._score_delta(emb_dict))
 
         if strategy == "relative":
             final_scores = raw_rel
         elif strategy == "absolute":
             final_scores = raw_abs
+        elif strategy == "delta":
+            final_scores = raw_delta
         elif strategy == "weighted":
             final_scores = self._combine_weighted(raw_rel, raw_abs)
         elif strategy == "cascade":
